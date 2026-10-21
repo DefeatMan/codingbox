@@ -1,0 +1,113 @@
+## TL;DR
+
+Codingbox 是基于 WEDE 的轻量面试工具：输入面试码，进入共享编程空间。
+
+## Details
+
+| 功能 | 实现 |
+| --- | --- |
+| 面试官控制台 | 密码登录、创建、列表、结束、导出 |
+| 候选人加入 | 面试码或直接房间链接，无需注册或再次登录 IDE |
+| 在线编程 | WEDE 编辑器、共享光标、共享终端 |
+| 语言服务 | Python / TypeScript / Go / C++ / Rust，预装编译器与语言服务器 |
+| 一键运行 | 顶栏 ▶ Run，等待保存后在共享终端运行，支持 stdin 和退出码 |
+| 面试内切换 | 共享语言选择；各语言保留独立项目，终端与 LSP 跟随切换 |
+| 房间生命周期 | 每场独立容器、到期关闭、数据卷保留 |
+
+![Codingbox portal](docs/portal.png)
+
+## 本地启动
+
+需要 Node.js 22.13+、npm、Docker Engine/Desktop，以及可用的 Docker daemon。建议 Node.js 24 LTS。
+
+```sh
+git clone --recurse-submodules https://github.com/DefeatMan/codingbox.git
+cd codingbox
+npm ci
+npm run image:build
+cp .env.example .env
+```
+
+编辑 `.env`，把 `ADMIN_PASSWORD` 改为至少 12 位的独立密码，然后运行：
+
+```sh
+npm start
+```
+
+打开 **http://localhost:3000**。使用 `localhost`，不要用 `127.0.0.1` 访问门户。
+
+1. 点击「面试官入口」，输入 `.env` 中的密码。
+2. 创建房间，等待状态变成「进行中」。
+3. 将面试码或邀请链接发给候选人。
+4. 双方填入自己的名字进入。例如 `ABCD-2345`。
+5. 结束后，在控制台下载 `.tar.gz` 代码包。
+
+浏览器会进入同一站点的 `/rooms/abcdefgh/`。有效的面试码就是入场凭据，也可直接分享该房间链接；无需通配 DNS 或为每个房间注册 tunnel。
+
+## 架构
+
+```mermaid
+flowchart LR
+  A[面试官 / 候选人] --> B[门户 localhost:3000]
+  B --> C[SQLite 房间与会话]
+  B --> D[Docker CLI]
+  A --> E[同站点 /rooms/code/]
+  E --> F[验证会话 + HTTP / WS 代理]
+  F --> G[独立 WEDE 容器]
+  D --> G
+  G --> H[独立持久数据卷]
+  G --> I[Python / TypeScript / Go / C++ / Rust LSP]
+```
+
+所有房间复用一个入口。门户按 `/rooms/{code}/` 分流 HTTP、WebSocket 和资源请求；浏览器存储按面试码区分，避免多标签页串房。编辑器端口只监听宿主机回环地址。本版不提供房间之间的浏览器 origin 隔离。
+
+## 运行配置
+
+| 变量 | 默认值 / 说明 |
+| --- | --- |
+| `PUBLIC_URL` | `http://localhost:3000`；公网设为 `https://app.boxlite.ai` |
+| `HOST` / `PORT` | `127.0.0.1` / `3000` |
+| `ADMIN_PASSWORD` | 必填，至少 12 位 |
+| `DATA_DIR` | `.data`，保存 SQLite 和会话 |
+| `WEDE_IMAGE` | `codingbox-wede:local` |
+| `MAX_ACTIVE_ROOMS` | `5`；启动中或错误房间也占用名额，结束后释放 |
+| `ROOM_MEMORY` / `ROOM_CPUS` | 每场 `1g` / `1` CPU |
+
+房间有效期为 15–480 分钟；界面提供 1、2、4、8 小时。服务每 15 秒清理过期实例，请求校验会立即拒绝过期访问。
+
+重启门户会恢复已有房间的代理目标；中断的创建流程会清理。结束操作撤销访问并关闭连接，移除容器但保留卷。导出仅包含 `project`，不包含门户数据库或 WEDE 登录配置。
+
+## 部署到 app.boxlite.ai
+
+参见 [部署说明](docs/deployment.md)，包含域名、TLS、反向代理和 systemd 配置。只需 `app.boxlite.ai` 指向主机，所有房间复用该域名。
+
+## 验证
+
+```sh
+npm run check
+npm test
+npx playwright install chromium
+# 在另一终端用 npm start 启动服务；使用同一份 .env
+npm run test:e2e
+```
+
+集成测试覆盖访问控制、撤销、到期及恢复。浏览器测试覆盖共享编辑、终端增删与改名、文档重连、LSP 和五种语言运行。
+
+点击顶栏 **▶ Run** 运行当前所选语言的项目入口（如 Go 的 `go run .`），输出显示在新的共享终端。双方可输入 stdin、按 Ctrl+C 中断；刷新页面不会自动重新执行。每个项目最多 16 个终端，达到上限后先关闭旧终端。
+
+终端默认在底部展开。终端列表由服务端管理，约每半秒检查更新；跨公网时还需加上网络延迟。协作状态保存在项目的 `.wede/collab`，用于重连和进程恢复，避免纯文本重新初始化导致内容叠加。
+
+## 已知边界
+
+- 这是单机实验版，容器提供基本隔离，不等同于微虚拟机。编辑器不挂载 Docker socket、主机目录或业务凭证。
+- WEDE 的实时协作默认关闭，Codingbox 在加入时开启；避免手动关闭协作，否则会退回独立编辑。
+- WEDE 暂不协调终端或 Git 对已打开文件的外部修改。通过编辑器修改代码，终端用于运行。
+- 每场面试保留独立 Docker 卷，需定期备份、人工清理。参见部署说明。
+- 可选 Linux native 预览模式使用独立 Unix 用户和私有目录，资源上限由外层 Box 提供；它没有每房间容器。参见 [BoxLite 预览](docs/boxlite-preview.md)。
+- 当前没有录像回放、评分、候选人账号或多人组织管理。
+
+## 来源与设计
+
+- [初始设计](https://github.com/DefeatMan/codingbox/issues/1) · [单入口设计](https://github.com/DefeatMan/codingbox/issues/2)
+- [WEDE](https://github.com/vul-os/wede) 固定为 Git 子模块；镜像构建时应用 [兼容补丁](docker/patch-wede.mjs)，修正协作与 LSP 生命周期。子模块工作区保持原样。
+- 与 WEDE 一致，采用 [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) 双许可证，可任选其一；保留 VulOS 和 Codingbox 的版权声明。第三方依赖及字体保留各自许可证，编辑器 `/licenses.txt` 可查看依赖声明，门户字体声明位于 `public/fonts/`。

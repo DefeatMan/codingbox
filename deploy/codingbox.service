@@ -1,0 +1,21 @@
+[Unit]
+Description=Codingbox interview portal
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# Replace these with a dedicated account that can access Docker.
+User=codingbox
+Group=codingbox
+WorkingDirectory=/opt/codingbox
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/codingbox/.env
+ExecStart=/usr/bin/env npm start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

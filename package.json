@@ -1,0 +1,35 @@
+{
+  "name": "codingbox",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:e2e": "playwright test",
+    "image:build": "docker build -f docker/wede.Dockerfile -t codingbox-wede:local ."
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.2.1",
+    "http-proxy": "^1.18.1",
+    "tsx": "^4.20.6",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/express": "^5.0.5",
+    "@types/http-proxy": "^1.17.16",
+    "@types/node": "^22.18.12",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.9.3",
+    "ws": "^8.22.0"
+  },
+  "license": "MIT OR Apache-2.0"
+}

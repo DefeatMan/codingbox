@@ -1,0 +1,10 @@
+.git
+.env
+.data
+node_modules
+test-results
+playwright-report
+third_party/wede/.git
+third_party/wede/web/node_modules
+third_party/wede/web/dist
+third_party/wede/wede

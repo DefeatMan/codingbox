@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c0e14">
+  <meta name="description" content="输入面试码，进入共享编程空间。">
+  <title>Codingbox · 一起把思路写下来</title>
+  <link rel="icon" href="/icon.svg?v=midnight-2" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="nav">
+    <a href="/" class="brand"><img class="brand-mark" src="/icon.svg" width="24" height="24" alt=""> codingbox<span class="badge">INTERVIEW</span></a>
+    <div class="nav-actions"><span class="nav-note"><span class="dot"></span> 一起思考，一起编程</span><button id="admin-toggle" class="button quiet">面试官入口 <span>↗</span></button><button id="logout" class="button quiet" hidden>退出登录 ↗</button></div>
+  </header>
+
+  <main>
+    <section id="guest" class="guest-layout">
+      <div class="intro">
+        <div class="eyebrow"><span class="tiny-cross">✳</span> CODINGBOX / INTERVIEW WORKSPACE</div>
+        <h1>共享编程，<br>专注<span class="accent">每一个思路。</span></h1>
+        <p class="intro-copy">输入面试码，进入熟悉的编程环境。<br>实时协作、智能补全和共享终端，随时开始。</p>
+        <div class="editor-preview" aria-hidden="true">
+          <div class="preview-top"><span class="preview-tab"><span class="file-icon">Py</span> main.py <span class="tab-close">×</span></span><span class="preview-live"><span class="dot"></span> LIVE</span></div>
+          <div class="preview-code"><div><em>01</em><span class="violet">def</span> <span class="green">solve</span>(ideas):</div><div><em>02</em>    <span class="muted"># Start with a conversation.</span></div><div><em>03</em>    <span class="violet">return</span> <span class="green">build_together</span>(ideas)<span class="peer-cursor"><small>Alex</small></span></div><div><em>04</em></div><div><em>05</em><span class="green">print</span>(solve([<span class="yellow">"your next idea"</span>]))</div></div>
+          <div class="preview-bottom"><span>◉ Python</span><span>2 people, one workspace</span></div>
+        </div>
+      </div>
+
+      <div class="join-panel">
+        <div class="panel-index">JOIN SESSION</div>
+
+        <h2>准备好了？</h2>
+        <p class="muted">输入面试官提供的面试码，即可开始。</p>
+        <form id="join-form">
+          <label for="join-code">面试码 <span>ROOM CODE</span></label>
+          <input id="join-code" name="code" class="code-input" placeholder="ABCD-2345" required maxlength="9" autocomplete="off" spellcheck="false" autocapitalize="characters" pattern="[A-Za-z2-9]{4}-?[A-Za-z2-9]{4}">
+          <label for="join-name">你的名字 <span>DISPLAY NAME</span></label>
+          <input id="join-name" name="name" placeholder="如何称呼你？" required maxlength="32" autocomplete="name">
+          <button class="button primary wide" type="submit"><span>进入编程空间</span><span>↗</span></button>
+          <p id="join-error" class="error" role="alert"></p>
+        </form>
+        <div class="join-foot"><span>↔ 实时协作</span><span>⌘ 智能补全</span><span>◈ 无需注册</span></div>
+      </div>
+    </section>
+
+    <section id="dashboard" hidden>
+      <div class="dashboard-heading"><div><div class="eyebrow">YOUR INTERVIEW DESK</div><h1>面试工作台<span class="accent">.</span></h1><p class="muted">准备空间，分享面试码，然后一起开始。</p></div></div>
+      <div class="dashboard-grid">
+        <aside class="create-panel"><div class="panel-index">NEW SESSION</div><h2>创建面试</h2><form id="create-form">
+          <label for="room-title">面试名称</label><input id="room-title" name="title" placeholder="例如：后端开发 · 第一轮" required maxlength="80">
+          <label for="room-language">编程语言</label><select id="room-language" name="language"><option value="python">Python</option><option value="typescript">TypeScript</option><option value="go">Go</option><option value="cpp">C++</option><option value="rust">Rust</option></select>
+          <label for="room-duration">房间有效时间</label><select id="room-duration" name="minutes"><option value="60">1 小时</option><option value="120" selected>2 小时</option><option value="240">4 小时</option><option value="480">8 小时</option></select>
+          <button type="submit" class="button primary wide"><span>创建编程空间</span><span>＋</span></button><p id="create-error" class="error" role="alert"></p>
+        </form><p class="small muted">有效期内可随时加入。结束后可下载代码。</p></aside>
+        <div class="room-section"><div class="room-list-heading"><div class="panel-index">YOUR SESSIONS</div><span id="room-count" class="muted small"></span></div><p id="list-error" class="error" role="alert"></p><div id="room-list"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer><span><span class="dot"></span> Codingbox <span class="footer-slash">/</span> Interview workspace</span><span>Python · TypeScript · Go · C++ · Rust</span></footer>
+
+  <dialog id="login-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">INTERVIEWER ACCESS</div><h2>面试官登录</h2><p class="muted">登录后创建和管理面试空间。</p><form id="login-form"><label for="admin-password">面试官密码</label><input id="admin-password" name="password" type="password" required autocomplete="current-password"><button class="button primary wide" type="submit">登录工作台 ↗</button><p id="login-error" class="error" role="alert"></p></form></dialog>
+  <dialog id="enter-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">ENTER YOUR SESSION</div><h2>进入面试</h2><form id="enter-form"><label for="interviewer-name">你的名字</label><input id="interviewer-name" name="name" value="面试官" required maxlength="32"><button class="button primary wide" type="submit">进入编程空间 ↗</button><p id="enter-error" class="error" role="alert"></p></form></dialog>
+  <dialog id="end-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">END SESSION</div><h2>结束这场面试？</h2><p class="muted">所有参与者将断开连接，代码会保留供下载。</p><form id="end-form"><button class="button danger wide" type="submit">结束面试</button><p id="end-error" class="error" role="alert"></p></form></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>
