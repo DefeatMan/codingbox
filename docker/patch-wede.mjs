@@ -98,6 +98,12 @@ edit('web/src/components/IDE.tsx', source => {
             <Globe className="w-3.5 h-3.5" />
           </button>`, '');
   source = replace(source, "useState<TerminalMode>('hidden')", "useState<TerminalMode>('docked')");
+  source = replace(source, '  const [termFullscreen, setTermFullscreen] = useState(false)', `  const [termFullscreen, setTermFullscreen] = useState(false)
+  useEffect(() => {
+    if (!terminalsApi.runGeneration) return
+    setTerminalMode('docked')
+    if (isMobile) setMobilePanel('terminal')
+  }, [terminalsApi.runGeneration, isMobile])`);
   source = replace(source, "useRef<TerminalMode>('floating')", "useRef<TerminalMode>('docked')");
   for (const title of ['Source Control', 'API Client']) {
     const pattern = new RegExp(`          <ActivityBtn\\n(?:(?!<ActivityBtn)[\\s\\S])*?title="${title}"[\\s\\S]*?          />\\n`);
@@ -150,17 +156,28 @@ edit('backend/internal/collabdoc/persistence.go', source => {
 writeFileSync(join(root, 'web/src/hooks/useTerminals.ts'), readFileSync(join(overlays, 'useTerminals.ts')));
 writeFileSync(join(root, 'backend/internal/terminal/registry.go'), readFileSync(join(overlays, 'registry.go')));
 writeFileSync(join(root, 'backend/internal/terminal/registry_test.go'), readFileSync(join(overlays, 'registry_test.go')));
+for (const path of ['run.go', 'run_process_linux.go', 'run_process_other.go', 'run_test.go']) {
+  writeFileSync(join(root, 'backend/internal/terminal', path), readFileSync(join(overlays, path)));
+}
 edit('backend/cmd/wede/main.go', source => {
   source = replace(source, '"wede/backend/internal/lsp"', '"wede/backend/internal/lsp"\n "wede/backend/internal/interview"');
-  source = replace(source, '\tro := authHandler.RequireOwner', '\tro := authHandler.RequireOwner\n interviewHandler := interview.New(rootFolder.Current(), "/opt/codingbox/templates", wsMgr)\n protected.Handle("POST /api/interview/run", re(http.HandlerFunc(interviewHandler.Run)))\n protected.HandleFunc("GET /api/interview/language", interviewHandler.Handle)\n protected.Handle("POST /api/interview/language", re(http.HandlerFunc(interviewHandler.Handle)))');
+  source = replace(source, '\tro := authHandler.RequireOwner', '\tro := authHandler.RequireOwner\n interviewHandler := interview.New(rootFolder.Current(), "/opt/codingbox/templates", wsMgr)\n protected.Handle("POST /api/interview/run", re(http.HandlerFunc(interviewHandler.Run)))\n protected.Handle("GET /api/interview/terminal", re(http.HandlerFunc(interviewHandler.Runner.HandleWS)))\n protected.HandleFunc("GET /api/interview/chat", interviewHandler.Chat)\n protected.HandleFunc("GET /api/interview/terminal/sessions", interviewHandler.Runner.Manage)\n protected.Handle("DELETE /api/interview/terminal/sessions", re(http.HandlerFunc(interviewHandler.Runner.Manage)))\n protected.HandleFunc("GET /api/interview/language", interviewHandler.Handle)\n protected.Handle("POST /api/interview/language", re(http.HandlerFunc(interviewHandler.Handle)))');
+  source = replace(source, '\t\ttunnelMgr.Close()', '\t\tinterviewHandler.Runner.Close()\n\t\ttunnelMgr.Close()');
   const route = '\tprotected.HandleFunc("GET /api/workspaces/{id}/terminal/sessions", rs(func(ws *workspace.Workspace) http.HandlerFunc { return ws.Terminal().ListSessions }))';
   return replace(source, route, route.replace('ListSessions', 'ManageSessions') + '\n\tprotected.Handle("POST /api/workspaces/{id}/terminal/sessions", re(rs(func(ws *workspace.Workspace) http.HandlerFunc { return ws.Terminal().ManageSessions })))');
 });
 edit('backend/internal/terminal/terminal.go', source => {
   source = replace(source, '\t"encoding/json"', '\t"encoding/json"\n\t"fmt"\n\t"strconv"');
   source = replace(source, '\tmu     sync.Mutex', '\toutputMu sync.Mutex // orders replay and live output\n\tmu     sync.Mutex');
+  source = replace(source, 'sessions map[string]*session', 'sessions map[string]*session\n runOnly bool');
   source = replace(source, '\tws       WorkspaceProvider', '\ttabs []terminalTab\n\tnextTab int\n\ttabRevision int\n\tws       WorkspaceProvider');
   source = replace(source, '\tif s, ok := h.sessions[id]; ok && !s.closed {', `\tif strings.HasPrefix(id, "term-") && h.nextTab > 0 {\n\t\tn, _ := strconv.Atoi(strings.TrimPrefix(id, "term-"))\n\t\tfound := false\n\t\tfor _, tab := range h.tabs { if tab.ID == n { found = true } }\n\t\tif !found { return nil, false, fmt.Errorf("terminal was closed") }\n\t}\n\n\tif s, ok := h.sessions[id]; ok && !s.closed {`);
+  source = replace(source, '\tlog.Printf("[terminal] creating new session', '\tif h.runOnly { return nil, false, fmt.Errorf("Run session is no longer active") }\n return h.createSessionLocked(id, h.ws.Current(), false)\n}\n\n// Caller holds h.mu. Run sessions are only created by the serialized Run handler.\nfunc (h *Handler) createSessionLocked(id, dir string, run bool) (*session, bool, error) {\n\tlog.Printf("[terminal] creating new session');
+  source = replace(source, '\tdir := h.ws.Current()\n', '');
+  source = replace(source, '\tcmd := exec.Command(shell, "-l")', '\tcmd := exec.Command(shell, "-l")\n if run { cmd = exec.Command("/bin/bash", "--noprofile", "--norc", "-i", "+m") }');
+  source = replace(source, '\t\t\t\tdelete(h.sessions, id)', '\t\t\t\tif h.sessions[id] == s { delete(h.sessions, id) }');
+  source = replace(source, 'ok && !s.closed {', 'ok && s.isOpen() {');
+  source = replace(source, 'if !s.closed {', 'if s.isOpen() {');
   source = replace(source, 'len(s.buf.data)', 'len(s.buf.Bytes())');
   source = replace(source, '\t\t\ts.buf.Write(data)\n\t\t\ts.broadcast(websocket.BinaryMessage, data)', '\t\t\ts.outputMu.Lock()\n\t\t\ts.buf.Write(data)\n\t\t\ts.broadcast(websocket.BinaryMessage, data)\n\t\t\ts.outputMu.Unlock()');
   source = replace(source, '\tsub := s.addSub(conn)', '\ts.outputMu.Lock()\n\tsub := s.addSub(conn)');
@@ -170,6 +187,7 @@ edit('backend/internal/terminal/terminal.go', source => {
   return source;
 });
 edit('web/src/components/Terminal.tsx', source => {
+  source = replace(source, 'const path = workspaceId', "const path = sid.startsWith('codingbox-run-') ? '/api/interview/terminal' : workspaceId");
   source = replace(source, '    if (!containerRef.current || !token || termRef.current) return', '    if (!containerRef.current || !token || termRef.current) return\n    mountedRef.current = true');
   source = replace(source, '          term.clear()', '          term.reset()');
   source = replace(source, '    setTimeout(() => fitAddon.fit(), 50)', '    const canResize = () => !!containerRef.current?.offsetWidth && !!containerRef.current?.offsetHeight\n    setTimeout(() => { if (canResize()) fitAddon.fit() }, 50)');
@@ -180,9 +198,18 @@ edit('web/src/components/Terminal.tsx', source => {
   source = replace(source, '    const ro = new ResizeObserver(() => {\n      try { fitAddon.fit() }', '    const ro = new ResizeObserver(() => {\n      if (!containerRef.current?.offsetWidth || !containerRef.current?.offsetHeight) return\n      try { fitAddon.fit() }');
   return source;
 });
-edit('web/src/components/TerminalPanel.tsx', source => replace(source,
+edit('web/src/types.ts', source => replace(source, 'export interface TerminalSession {', 'export interface TerminalSession {\n  runSession?: string\n  generation?: number'));
+edit('web/src/components/FloatingTerminals.tsx', source => replace(source,
+  'token={token} workspaceId={workspaceId} sessionId={`term-${t.id}`}',
+  'key={t.runSession} token={token} workspaceId={workspaceId} sessionId={t.runSession || `term-${t.id}`}'));
+edit('web/src/components/TerminalPanel.tsx', source => {
+  source = replace(source, '<Terminal\n            key={t.id}', '<Terminal\n            key={t.runSession || t.id}');
+  source = replace(source, '{terminals.length > 1 && (', '{(t.id === 0 || terminals.filter(item => item.id !== 0).length > 1) && (');
+  source = replace(source, 'sessionId={`term-${t.id}`}', 'sessionId={t.runSession || `term-${t.id}`}');
+  return replace(source,
   'onClick={(e) => { e.stopPropagation(); closeTerminal(t.id) }}',
-  'title={`Close ${t.name}`} role="button" aria-label={`Close ${t.name}`} onClick={(e) => { e.stopPropagation(); closeTerminal(t.id) }}'));
+  'title={`Close ${t.name}`} role="button" aria-label={`Close ${t.name}`} onClick={(e) => { e.stopPropagation(); closeTerminal(t.id) }}');
+});
 
 edit('web/src/components/IDE.tsx', source => {
   const start = source.indexOf('  const { extension: lspExtension, available: lspAvailable } = useLSP({');
@@ -205,6 +232,62 @@ edit('backend/internal/lsp/lsp.go', source => {
   const anchor = '\tlog.Printf("[lsp] ws connected: lang=%s workspace=%s", lang, workspaceDir)';
   return replace(source, anchor, `\tdefer func() {\n\t\th.mu.Lock()\n\t\tdelete(h.servers, key)\n\t\th.mu.Unlock()\n\t\tproc.kill()\n\t}()\n\n${anchor}`);
 });
+
+// Chat is room-wide; legacy language histories retain their original records.
+for (const path of ['room_history.go', 'room_history_test.go', 'room_chat.go', 'room_chat_test.go', 'chat_multiline_test.go']) {
+  writeFileSync(join(root, 'backend/internal/chat', path), readFileSync(join(overlays, path)));
+}
+writeFileSync(join(root, 'web/src/hooks/useChat.ts'), readFileSync(join(overlays, 'useChat.ts')));
+edit('web/src/components/Chat.tsx', source => {
+  source = removeBetween(source, '        {workspaceName && (', '      </div>\n\n      {/* ── Message list', '        <div className="text-[10px] text-text-muted">房间聊天 · 所有语言共享</div>\n');
+  source = replace(source, "const text = input.trim()\n    if (!text) return", "const text = input\n    if (!text.trim()) return");
+  source = replace(source, 'const { messages, sendMessage } = useChat(', 'const { messages, sendMessage, status } = useChat(');
+  source = replace(source, '    sendMessage(text)', '    if (!sendMessage(text)) return');
+  source = replace(source, 'disabled={!input.trim()}', "disabled={!input.trim() || status !== 'ready'}");
+  source = replace(source, '{rows.length === 0 ? (', `{rows.length === 0 && status !== 'ready' ? (
+          <div role="status" className="flex items-center justify-center h-full text-text-muted text-xs">{status === 'error' ? '连接失败，正在重试…' : 'Loading…'}</div>
+        ) : rows.length === 0 ? (`);
+  source = replace(source, '<div ref={listRef}', `{status !== 'ready' && rows.length > 0 && <div role="status" className="px-3 py-1 text-xs text-text-muted">Loading…</div>}
+      <div ref={listRef}`);
+  return replace(source, "if (e.key === 'Enter' && !e.shiftKey)", "if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229)");
+});
+edit('backend/internal/chat/chat.go', source => {
+  source = replace(source, '"sort"', '"sort"\n "strconv"\n "context"');
+  source = replace(source, '\tpeers := make([]*peer, 0, len(h.peers))\n\tfor _, p := range h.peers {\n\t\tpeers = append(peers, p)\n\t}', '\tpeers := make(map[string]*peer,len(h.peers))\n for id,p:=range h.peers { peers[id]=p }');
+  source = replace(source, '\tfor _, p := range peers {\n\t\tselect {', '\th.mu.Lock()\n defer h.mu.Unlock()\n for id,p:=range peers {\n  if h.peers[id]!=p { continue }\n\t\tselect {');
+  source = replace(source, 'type Hub struct {', 'type Hub struct {\n activityMu sync.Mutex\n activity []Message\n activityAt time.Time');
+  source = replace(source, 'func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {', 'func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) { h.handleWS(w,r,false) }\n\nfunc (h *Hub) handleWS(w http.ResponseWriter, r *http.Request, room bool) {');
+  source = replace(source, 'id, out := h.Join(username, color)', 'var id string\n var out <-chan []byte\n if room { id,out = h.JoinRoom(username,color) } else { id,out = h.Join(username,color) }');
+  source = replace(source, 'out, err := exec.Command("git", fullArgs...).Output()', 'ctx,cancel:=context.WithTimeout(context.Background(),3*time.Second)\n defer cancel()\n cmd:=exec.CommandContext(ctx,"git",fullArgs...)\n cmd.WaitDelay=time.Second\n out,err:=cmd.Output()');
+  source = replace(source, 'kind := kbracket[1 : len(kbracket)-1]', 'kind := kbracket[1 : len(kbracket)-1]\n encoded := kind == "user-json"\n if encoded { kind = "user" }');
+  source = replace(source, '\treturn msg, true', '\tif encoded {\n  text, err := strconv.Unquote(msg.Text)\n  if err != nil { return Message{}, false }\n  msg.Text = text\n }\n return msg, true');
+  source = replace(source, 'ts := m.Time.UTC().Format(time.RFC3339)', 'ts := m.Time.UTC().Format(time.RFC3339Nano)');
+  source = replace(source, '\t\treturn fmt.Sprintf("- %s [user] %s: %s\\n", ts, m.User, m.Text)', '\t\tif strings.ContainsAny(m.Text, "\\n\\t") || strings.TrimSpace(m.Text) != m.Text {\n   return fmt.Sprintf("- %s [user-json] %s: %s\\n", ts, m.User, strconv.Quote(m.Text))\n  }\n  return fmt.Sprintf("- %s [user] %s: %s\\n", ts, m.User, m.Text)');
+  source = removeBetween(source, '// sanitizeText neutralises', '// PostSystem posts', `// Preserve message layout while removing non-text control characters. The
+// user-json disk format escapes newlines/tabs into one physical history record.
+func sanitizeText(text string) string {
+ text = strings.ReplaceAll(strings.ReplaceAll(text, "\\r\\n", "\\n"), "\\r", "\\n")
+ text = strings.Map(func(r rune) rune {
+  if unicode.IsControl(r) && r != '\\n' && r != '\\t' { return ' ' }
+  return r
+ }, text)
+ if strings.TrimSpace(text) == "" { return "" }
+ return text
+}
+
+func (h *Hub) Post(user, color, text string) {
+ text = sanitizeText(text)
+ if text == "" { return }
+ h.post(user, color, text, "user")
+}
+
+`);
+  return replace(source, 'h.Post(username, color, strings.TrimSpace(in.Text))', 'h.Post(username, color, in.Text)');
+});
+// This assertion encoded the old single-line-only representation. All its
+// injection, record count, control-character and parsed-attribution checks remain.
+edit('backend/internal/chat/chat_test.go', source => replace(source,
+  'strings.Contains(s, "[user] mallory:")', 'strings.Contains(s, "[user-json] mallory:")'));
 
 // One origin, many room paths: adapt explicit transport/asset/storage boundaries.
 writeFileSync(join(root, 'web/src/roomScope.ts'), readFileSync(join(overlays, 'roomScope.ts')));
@@ -231,7 +314,7 @@ for (const path of ['hooks/useAuth.ts', 'hooks/useTheme.tsx', 'components/IDE.ts
     return "import { roomStorage as localStorage } from '../roomScope'\n" + source;
   });
 }
-for (const path of ['hooks/useCollab.ts', 'hooks/useChat.ts', 'hooks/useDap.ts', 'hooks/useYDoc.ts']) {
+for (const path of ['hooks/useCollab.ts', 'hooks/useDap.ts', 'hooks/useYDoc.ts']) {
   edit('web/src/' + path, source => "import { roomBase } from '../roomScope'\n" + replace(source, '${host}/api', '${host}${roomBase}/api'));
 }
 edit('web/src/hooks/useLSP.ts', source => "import { roomPath } from '../roomScope'\n" + replace(source, '${window.location.host}${path}', '${window.location.host}${roomPath(path)}'));

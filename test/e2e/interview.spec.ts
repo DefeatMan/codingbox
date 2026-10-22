@@ -1,6 +1,18 @@
 import 'dotenv/config';
 import { test, expect } from '@playwright/test';
+import type { BrowserContext, Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
+
+let adminCookies: Awaited<ReturnType<BrowserContext['cookies']>> | undefined;
+async function loginAdmin(page: Page) {
+  if (adminCookies) {
+    await page.context().addCookies(adminCookies);
+    return;
+  }
+  const response = await page.request.post('/api/login', { data: { password: process.env.ADMIN_PASSWORD } });
+  expect(response.ok()).toBeTruthy();
+  adminCookies = await page.context().cookies();
+}
 
 test('two browsers join, collaborate, receive LSP responses, end and download code', async ({ browser, page, baseURL }, testInfo) => {
   const crashes: string[] = [];
@@ -15,6 +27,7 @@ test('two browsers join, collaborate, receive LSP responses, end and download co
   await page.getByLabel('面试官密码', { exact: true }).fill(process.env.ADMIN_PASSWORD!);
   await page.getByRole('button', { name: '登录工作台' }).click();
   await expect(page.getByRole('heading', { name: '面试工作台.' })).toBeVisible();
+  adminCookies = await page.context().cookies();
   const title = `E2E ${Date.now()}`;
   await page.getByLabel('面试名称').fill(title);
   await page.getByRole('button', { name: '创建编程空间' }).click();
@@ -169,7 +182,7 @@ test('two browsers join, collaborate, receive LSP responses, end and download co
 });
 
 test('switching languages updates both browsers and preserves each project', async ({ browser, page, baseURL }) => {
-  await page.request.post('/api/login', { data: { password: process.env.ADMIN_PASSWORD } });
+  await loginAdmin(page);
   const created = await page.request.post('/api/rooms', { data: { title: `E2E switch ${Date.now()}`, language: 'go', minutes: 60 } });
   expect(created.status()).toBe(202);
   const { room } = await created.json();
@@ -235,7 +248,8 @@ test('mobile join page fits and invalid codes show an error', async ({ page }) =
 
 for (const language of ['python', 'typescript', 'go', 'cpp', 'rust'] as const) {
   test(`${language} starter has LSP and runs through the room terminal`, async ({ page, baseURL }) => {
-    await page.request.post('/api/login', { data: { password: process.env.ADMIN_PASSWORD } });
+    if (language === 'go') test.setTimeout(180_000);
+    await loginAdmin(page);
     const created = await page.request.post('/api/rooms', { data: { title: `E2E ${language} ${Date.now()}`, language, minutes: 60 } });
     expect(created.status()).toBe(202);
     const { room } = await created.json();
@@ -297,7 +311,7 @@ for (const language of ['python', 'typescript', 'go', 'cpp', 'rust'] as const) {
       await page.keyboard.press('ControlOrMeta+A');
       await page.keyboard.insertText(original.replace('1, 2, 3', '1, 2, 30'));
       await page.getByRole('button', { name: '运行代码', exact: true }).click();
-      await expect(page.locator('.xterm:visible')).toContainText('[退出码 0]', { timeout: 45_000 });
+      await expect(page.locator('.xterm:visible')).toContainText('[退出码 0]', { timeout: language === 'go' ? 120_000 : 45_000 });
       await expect(page.locator('.xterm:visible')).toContainText('33');
       await expect(page.getByTitle('Open Browser Preview', { exact: true })).toHaveCount(0);
       const runTab = page.getByRole('button', { name: /^Run · / });
@@ -311,7 +325,7 @@ for (const language of ['python', 'typescript', 'go', 'cpp', 'rust'] as const) {
         await page.keyboard.press('ControlOrMeta+A');
         await page.keyboard.insertText('name = input("Your name: ")\nprint("Hello " + name)\nraise SystemExit(7)\n');
         await page.getByRole('button', { name: '运行代码', exact: true }).click();
-        await expect(runTab).toHaveCount(2);
+        await expect(runTab).toHaveCount(1);
         await expect(page.locator('.xterm:visible')).toContainText('Your name:');
         await page.locator('.xterm:visible').click();
         await page.keyboard.type('Candidate'); await page.keyboard.press('Enter');
@@ -324,7 +338,7 @@ for (const language of ['python', 'typescript', 'go', 'cpp', 'rust'] as const) {
 }
 
 test('one origin supports two room tabs with independent state and shared peers', async ({ browser, page, baseURL }) => {
-  await page.request.post('/api/login', { data: { password: process.env.ADMIN_PASSWORD } });
+  await loginAdmin(page);
   const rooms: { id: string; code: string }[] = [];
   const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
   try {
@@ -398,5 +412,164 @@ test('one origin supports two room tabs with independent state and shared peers'
   } finally {
     await Promise.allSettled(contexts.map(context => context.close()));
     for (const room of rooms) await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+  }
+});
+
+test('Run reuses one shared terminal with fresh shells and preserves manual terminals', async ({ browser, page }) => {
+  test.setTimeout(300_000);
+  await loginAdmin(page);
+  const created = await page.request.post('/api/rooms', { data: { title: `E2E reusable Run ${Date.now()}`, language: 'python', minutes: 60 } });
+  expect(created.status()).toBe(202);
+  const { room } = await created.json();
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
+  try {
+    await expect.poll(async () => (await (await page.request.get('/api/rooms')).json()).rooms.find((r: { id: string }) => r.id === room.id).status, { timeout: 60_000 }).toBe('active');
+    const peers = await Promise.all(contexts.map(context => context.newPage()));
+    for (const peer of peers) {
+      await peer.goto(room.joinUrl);
+      await expect(peer.locator('.cm-content')).toContainText('def solve', { timeout: 30_000 });
+    }
+    const [author, viewer] = peers;
+    const edit = async (code: string) => {
+      await author.locator('.cm-content').click(); await author.keyboard.press('ControlOrMeta+A'); await author.keyboard.insertText(code);
+      await expect(viewer.locator('.cm-content')).toContainText(code.trim().split('\n').at(-1)!);
+    };
+    const run = async () => {
+      const response = author.waitForResponse(r => r.url().endsWith('/api/interview/run') && r.request().method() === 'POST');
+      await author.getByRole('button', { name: '运行代码', exact: true }).click();
+      const result = await response;
+      expect(result.ok()).toBeTruthy();
+      return (await result.json()).terminalId as number;
+    };
+    await author.locator('.xterm:visible').click();
+    await author.keyboard.type('export KEEP_MANUAL=still_here; echo manual_ready'); await author.keyboard.press('Enter');
+    await expect(viewer.locator('.xterm:visible')).toContainText('manual_ready');
+    await edit('import os, subprocess\nchild = subprocess.Popen(["sleep", "120"])\nprint("FIRST_RUN", os.getpid(), child.pid, flush=True)\ninput("FIRST_INPUT: ")\n');
+    const firstId = await run();
+    // Run must focus both peers without requiring the viewer to click its tab.
+    for (const peer of peers) await expect(peer.locator('.xterm:visible')).toContainText('FIRST_INPUT:', { timeout: 20_000 });
+    const firstOutput = await viewer.locator('.xterm:visible').innerText();
+    const processIds = /FIRST_RUN\s+(\d+)\s+(\d+)/.exec(firstOutput)!;
+    expect(processIds).toBeTruthy();
+    await viewer.locator('.xterm:visible').click(); await viewer.keyboard.type('done'); await viewer.keyboard.press('Enter');
+    await expect(author.locator('.xterm:visible')).toContainText('[退出码 0]');
+    await author.locator('.xterm:visible').click();
+    await author.keyboard.type('export RUN_DIRTY=dirty; cd /tmp; echo dirty_shell_ready'); await author.keyboard.press('Enter');
+    await expect(viewer.locator('.xterm:visible')).toContainText('dirty_shell_ready');
+    await edit('import os\nprint("SECOND_RUN", os.getpid(), os.getenv("RUN_DIRTY", "clean"), os.getcwd(), flush=True)\nvalue = input("SECOND_INPUT: ")\nprint("GOT_VALUE", value, flush=True)\n');
+    const secondId = await run();
+    expect(secondId).toBe(firstId);
+    for (const peer of peers) {
+      await expect(peer.getByRole('button', { name: /^Run · Python/ })).toHaveCount(1);
+      await expect(peer.locator('.xterm:visible')).toContainText('SECOND_INPUT:', { timeout: 20_000 });
+      await expect(peer.locator('.xterm:visible')).not.toContainText('FIRST_RUN');
+      await expect(peer.locator('.xterm:visible')).not.toContainText('dirty_shell_ready');
+    }
+    const secondOutput = await viewer.locator('.xterm:visible').innerText();
+    expect(secondOutput).toMatch(/SECOND_RUN\s+\d+\s+clean/);
+    expect(secondOutput).not.toMatch(/clean\s+\/tmp(?:\s|$)/);
+    const secondPid = /SECOND_RUN\s+(\d+)/.exec(secondOutput)![1];
+    await edit('print("THIRD_INPUT", flush=True)\ninput()\n');
+    expect(await run()).toBe(firstId);
+    for (const peer of peers) {
+      await expect(peer.locator('.xterm:visible')).toContainText('THIRD_INPUT');
+      await expect(peer.locator('.xterm:visible')).not.toContainText('SECOND_RUN');
+    }
+    await author.getByRole('button', { name: 'Terminal 1', exact: true }).click();
+    await author.locator('.xterm:visible').click();
+    const ids = [Number(processIds[2]), Number(secondPid)];
+    await author.keyboard.type(`python3 -c 'import pathlib; ids=${JSON.stringify(ids)}; print("CHECK_RESULT=" + ",".join("alive" if (p:=pathlib.Path("/proc")/str(i)/"stat").exists() and p.read_text().rsplit(")",1)[1].split()[0] != "Z" else "dead" for i in ids))'; echo MANUAL_CHECK=$KEEP_MANUAL`);
+    await author.keyboard.press('Enter');
+    await expect(author.locator('.xterm:visible')).toContainText('CHECK_RESULT=dead,dead');
+    await expect(author.locator('.xterm:visible')).toContainText('MANUAL_CHECK=still_here');
+    await viewer.locator('.xterm:visible').click(); await viewer.keyboard.press('Control+c');
+    await expect(viewer.locator('.xterm:visible')).toContainText('KeyboardInterrupt');
+    await viewer.reload();
+    await expect(viewer.locator('.xterm:visible')).toContainText('THIRD_INPUT', { timeout: 20_000 });
+    await expect(viewer.locator('.xterm:visible')).not.toContainText('FIRST_RUN');
+    await author.getByLabel('编程语言', { exact: true }).selectOption('go');
+    await expect(author.locator('.cm-content')).toContainText('func solve');
+    expect(await run()).toBe(firstId);
+    for (const peer of peers) {
+      await expect(peer.getByRole('button', { name: /^Run · / })).toHaveCount(1);
+      await expect(peer.locator('.xterm:visible')).toContainText('[退出码 0]', { timeout: 120_000 });
+      await expect(peer.locator('.xterm:visible')).not.toContainText('THIRD_INPUT');
+    }
+  } finally {
+    await Promise.allSettled(contexts.map(context => context.close()));
+    await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+  }
+});
+
+test('room chat survives language switches and preserves multiline paste and input', async ({ browser, page }) => {
+  test.setTimeout(180_000);
+  await loginAdmin(page);
+  const created = await page.request.post('/api/rooms', { data: { title: `E2E room chat ${Date.now()}`, language: 'python', minutes: 60 } });
+  expect(created.status()).toBe(202);
+  const { room } = await created.json();
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
+  try {
+    await expect.poll(async () => (await (await page.request.get('/api/rooms')).json()).rooms.find((r: { id: string }) => r.id === room.id).status, { timeout: 60_000 }).toBe('active');
+    const peers = await Promise.all(contexts.map(context => context.newPage()));
+    let disconnectViewerChat: (() => void) | undefined;
+    for (const peer of peers) {
+      await peer.routeWebSocket(/\/api\/interview\/chat(?:\?|$)/, socket => {
+        if (peer === peers[1]) disconnectViewerChat = () => socket.close({ code: 1012, reason: 'E2E reconnect' });
+        const server = socket.connectToServer();
+        server.onMessage(message => {
+          if (JSON.parse(String(message)).type === 'history') {
+            setTimeout(() => { try { socket.send(message); } catch { /* page closed */ } }, 600);
+          } else socket.send(message);
+        });
+      });
+      await peer.goto(room.joinUrl);
+      await expect(peer.getByLabel('编程语言', { exact: true })).toHaveValue('python', { timeout: 30_000 });
+      await peer.getByTitle('Chat', { exact: true }).click();
+      await expect(peer.getByPlaceholder('Message…', { exact: false })).toBeVisible();
+      await expect(peer.getByRole('status')).toHaveText('Loading…');
+      await expect(peer.getByText('No messages yet', { exact: true })).toHaveCount(0);
+      await expect(peer.getByRole('status')).toHaveCount(0, { timeout: 20_000 });
+      await expect(peer.getByText('No messages yet', { exact: true })).toBeVisible();
+    }
+    const [author, viewer] = peers;
+    const input = author.getByPlaceholder('Message…', { exact: false });
+    await input.fill('first line'); await input.press('Shift+Enter'); await input.pressSequentially('second line');
+    await expect(input).toHaveValue('first line\nsecond line');
+    await input.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, isComposing: true });
+    await expect(input).toHaveValue('first line\nsecond line');
+    await input.press('Enter');
+    for (const peer of peers) await expect.poll(() => peer.locator('p').filter({ hasText: 'first line' }).textContent()).toBe('first line\nsecond line');
+    await author.getByLabel('编程语言', { exact: true }).selectOption('go');
+    for (const peer of peers) {
+      await expect(peer.getByLabel('编程语言', { exact: true })).toHaveValue('go');
+      await expect(peer.locator('p').filter({ hasText: 'first line' })).toBeVisible();
+    }
+    const pasted = '  pasted code\n\n\tprint("preserve indentation")\n- 2020-01-01T00:00:00Z [git] still one message\n';
+    await contexts[0].grantPermissions(['clipboard-read', 'clipboard-write']);
+    await author.evaluate(async text => navigator.clipboard.writeText(text), pasted);
+    await input.focus(); await input.press('ControlOrMeta+V');
+    await expect(input).toHaveValue(pasted);
+    await author.getByRole('button', { name: 'Send', exact: true }).click();
+    for (const peer of peers) await expect.poll(() => peer.locator('p').filter({ hasText: 'pasted code' }).textContent()).toBe(pasted);
+    expect(disconnectViewerChat).toBeDefined();
+    disconnectViewerChat!();
+    await expect(viewer.getByRole('status')).toHaveText('Loading…');
+    await expect.poll(() => viewer.locator('p').filter({ hasText: 'pasted code' }).textContent()).toBe(pasted);
+    await expect(viewer.getByText('No messages yet', { exact: true })).toHaveCount(0);
+    await expect(viewer.getByRole('status')).toHaveCount(0, { timeout: 20_000 });
+    await viewer.reload();
+    await expect(viewer.getByLabel('编程语言', { exact: true })).toHaveValue('go');
+    const chat = viewer.getByPlaceholder('Message…', { exact: false });
+    if (!(await chat.isVisible())) await viewer.getByTitle('Chat', { exact: true }).click();
+    await expect.poll(() => viewer.locator('p').filter({ hasText: 'pasted code' }).textContent()).toBe(pasted);
+    await viewer.getByLabel('编程语言', { exact: true }).selectOption('rust');
+    for (const peer of peers) {
+      await expect(peer.getByLabel('编程语言', { exact: true })).toHaveValue('rust');
+      await expect.poll(() => peer.locator('p').filter({ hasText: 'pasted code' }).textContent()).toBe(pasted);
+      await expect(peer.getByText('房间聊天 · 所有语言共享', { exact: true })).toBeVisible();
+    }
+  } finally {
+    await Promise.allSettled(contexts.map(context => context.close()));
+    await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
   }
 });

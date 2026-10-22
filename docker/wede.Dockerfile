@@ -17,6 +17,7 @@ COPY --from=frontend /build/backend/internal/lsp/lsp.go ./backend/internal/lsp/l
 COPY --from=frontend /build/backend/internal/terminal ./backend/internal/terminal
 COPY --from=frontend /build/backend/internal/collabdoc ./backend/internal/collabdoc
 COPY --from=frontend /build/backend/internal/interview ./backend/internal/interview
+COPY --from=frontend /build/backend/internal/chat ./backend/internal/chat
 COPY --from=frontend /build/backend/cmd/wede/main.go ./backend/cmd/wede/main.go
 COPY --from=frontend /build/web/dist ./backend/cmd/wede/dist
 COPY third_party/wede/site ./backend/cmd/wede/site

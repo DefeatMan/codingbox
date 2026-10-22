@@ -96,29 +96,3 @@ func (h *Handler) ManageSessions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]any{"sessions": ids, "terminals": h.tabs, "revision": h.tabRevision, "createdId": created})
 }
-
-// Run starts exactly once on the server, independent of browser attachment/reload.
-func (h *Handler) Run(name, command string) (int, error) {
-	h.mu.Lock()
-	if h.nextTab == 0 {
-		h.nextTab = 1
-		h.tabs = []terminalTab{{ID: 1, Name: "Terminal 1"}}
-	}
-	if len(h.tabs) >= 16 {
-		h.mu.Unlock()
-		return 0, fmt.Errorf("terminal limit reached; close a terminal first")
-	}
-	h.nextTab++
-	id := h.nextTab
-	h.tabs = append(h.tabs, terminalTab{ID: id, Name: name})
-	h.tabRevision++
-	h.mu.Unlock()
-	s, _, err := h.getOrCreateSession("term-" + strconv.Itoa(id))
-	if err != nil {
-		return 0, err
-	}
-	s.pmu.Lock()
-	_, err = s.ptmx.Write([]byte(command + "\n"))
-	s.pmu.Unlock()
-	return id, err
-}

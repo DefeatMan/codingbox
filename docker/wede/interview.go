@@ -5,11 +5,14 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"wede/backend/internal/chat"
 
+	"wede/backend/internal/terminal"
 	"wede/backend/internal/workspace"
 )
 
@@ -33,13 +36,17 @@ type Handler struct {
 	root, templates string
 	manager         *workspace.Manager
 	state           selection
+	Runner          *terminal.RunHandler
 }
 
 func New(root, templates string, manager *workspace.Manager) *Handler {
 	if canonical, err := filepath.EvalSymlinks(root); err == nil {
 		root = canonical
 	}
-	h := &Handler{root: root, templates: templates, manager: manager}
+	if err := chat.ImportRoomHistory(root); err != nil {
+		log.Printf("[interview] room chat import: %v", err)
+	}
+	h := &Handler{root: root, templates: templates, manager: manager, Runner: terminal.NewRun(root)}
 	data, err := os.ReadFile(filepath.Join(root, ".wede", "interview-language.json"))
 	if err == nil {
 		_ = json.Unmarshal(data, &h.state)
@@ -235,10 +242,22 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		command = `out=$(mktemp /tmp/codingbox-run.XXXXXX) && (g++ -std=c++20 main.cpp -o "$out" && "$out"); status=$?; rm -f "$out"; (exit "$status")`
 	}
 	command += `; printf '\n[退出码 %s]\n' "$?"`
-	id, err := ws.Terminal().Run("Run · "+lang.Label, command)
+	id, err := h.Runner.Start("Run · "+lang.Label, ws.Root(), command)
 	if err != nil {
-		http.Error(w, "无法运行，请关闭多余终端后重试。", 409)
+		http.Error(w, "无法重启运行终端，请重试。", 409)
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]any{"terminalId": id, "workspaceId": ws.ID})
+}
+
+// Chat remains attached to the initial project, independent of selected language.
+func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	ws, err := h.workspace(h.state.Initial)
+	h.mu.Unlock()
+	if err != nil {
+		http.Error(w, "Room chat unavailable", 503)
+		return
+	}
+	ws.Chat(r.URL.Query().Get("channel")).HandleRoomWS(w, r)
 }

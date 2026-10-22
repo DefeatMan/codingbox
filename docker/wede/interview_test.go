@@ -100,6 +100,7 @@ func TestRunRejectsStaleLanguageAndIgnoresClientCommand(t *testing.T) {
 	manager.Register("default", folder.New(base))
 	defer manager.Close("default")
 	h := New(base, base, manager)
+	defer h.Runner.Close()
 	for _, body := range []string{`{"language":"go","revision":0}`, `{"language":"python","revision":9}`} {
 		res := httptest.NewRecorder()
 		h.Run(res, httptest.NewRequest("POST", "/", strings.NewReader(body)))
@@ -114,7 +115,7 @@ func TestRunRejectsStaleLanguageAndIgnoresClientCommand(t *testing.T) {
 	}
 	var data map[string]any
 	json.Unmarshal(res.Body.Bytes(), &data)
-	if data["terminalId"].(float64) < 2 {
+	if data["terminalId"].(float64) != 0 {
 		t.Fatal("missing shared terminal")
 	}
 	if _, err := os.Stat(filepath.Join(base, "PWNED")); !os.IsNotExist(err) {
