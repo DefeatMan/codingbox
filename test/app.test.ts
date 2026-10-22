@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
 import { createApplication } from '../src/app.ts';
@@ -36,7 +36,9 @@ async function fixture() {
   });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
   const upstreamPort = (upstream.address() as { port: number }).port;
-  const runtime: Runtime & { stopped: string[]; failStart: boolean; failStop: boolean; recoveryChecks: number } = {
+  const runtime: Runtime & { stopped: string[]; removed: string[]; remove(room: Room): Promise<void>; failRemove: boolean; failStart: boolean; failStop: boolean; recoveryChecks: number } = {
+    removed: [], failRemove: false,
+    async remove(room) { if (this.failRemove) throw new Error('private storage command'); this.removed.push(room.id); },
     stopped: [], failStart: false, failStop: false, recoveryChecks: 0,
     async start() { if (this.failStart) throw new Error('secret command'); return upstreamPort; },
     async stop(room: Room) { if (this.failStop) throw new Error('stop failed'); this.stopped.push(room.id); },
@@ -46,9 +48,9 @@ async function fixture() {
   const application = createApplication({ publicUrl: origin, adminPassword: 'test-admin-password', dataDir: directory, maxRooms: 5 }, runtime);
   application.server.listen(0, '127.0.0.1'); await once(application.server, 'listening');
   const port = (application.server.address() as { port: number }).port;
-  const request = (path: string, body?: unknown, options: { cookie?: string; origin?: string; authorization?: string; host?: string } = {}) => new Promise<Response>((resolve, reject) => {
+  const request = (path: string, body?: unknown, options: { method?: string; cookie?: string; origin?: string; authorization?: string; host?: string } = {}) => new Promise<Response>((resolve, reject) => {
     const req = httpRequest(`http://127.0.0.1:${port}${path}`, {
-      method: body === undefined ? 'GET' : 'POST', headers: { Host: options.host ?? 'localhost:3000',
+      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { Host: options.host ?? 'localhost:3000',
         ...(options.cookie ? { Cookie: options.cookie } : {}),
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...(options.origin ? { Origin: options.origin } : {}),
@@ -233,4 +235,164 @@ test('startup reconciliation refreshes ports and cleans interrupted provisioning
     assert.equal(f.store.room(interrupted.id)?.status, 'ended');
     assert.ok(f.runtime.stopped.includes(interrupted.id));
   } finally { await f.dispose(); }
+});
+
+test('room creation defaults to Python without a language choice', async () => {
+  const f = await fixture();
+  try {
+    const response = await f.request('/api/rooms', { title: 'Default Python', minutes: 60 }, f.admin);
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).room.language, 'python');
+  } finally { await f.dispose(); }
+});
+
+test('history is filtered, searched literally, paginated and clamped after deletion', async () => {
+  const f = await fixture();
+  try {
+    for (let i = 0; i < 12; i++) {
+      const r = f.store.createRoom(`History ${i} ${i === 0 ? '100%_match' : ''}`, 'python', 60);
+      f.store.update(r.id, { status: 'ended', endedAt: i + 1 });
+    }
+    await f.create();
+    const first = await (await f.request('/api/rooms?tab=completed&pageSize=10', undefined, f.admin)).json();
+    assert.equal(first.total, 12); assert.equal(first.rooms.length, 10); assert.equal(first.pages, 2);
+    assert.deepEqual(first.counts, { ongoing: 1, completed: 12 });
+    assert.equal(first.rooms[0].title.trim(), 'History 11');
+    const second = await (await f.request('/api/rooms?tab=completed&page=2&pageSize=10', undefined, f.admin)).json();
+    assert.equal(second.rooms.length, 2);
+    const literal = await (await f.request('/api/rooms?tab=completed&q=%25_', undefined, f.admin)).json();
+    assert.equal(literal.total, 1);
+    const code = literal.rooms[0].code;
+    assert.equal((await (await f.request(`/api/rooms?tab=completed&q=${code.toLowerCase()}`, undefined, f.admin)).json()).total, 1);
+    const ongoing = await (await f.request('/api/rooms?tab=ongoing', undefined, f.admin)).json();
+    assert.equal(ongoing.total, 1); assert.equal(ongoing.rooms[0].status, 'active');
+    const deleted = await f.request('/api/rooms/batch-delete', { ids: second.rooms.map((r: Room) => r.id) }, f.admin);
+    assert.equal(deleted.status, 200);
+    const clamped = await (await f.request('/api/rooms?tab=completed&page=2&pageSize=10', undefined, f.admin)).json();
+    assert.equal(clamped.page, 1); assert.equal(clamped.total, 10);
+    assert.equal((await f.request('/api/rooms?tab=completed&page=0', undefined, f.admin)).status, 400);
+  } finally { await f.dispose(); }
+});
+
+test('deletion is admin-only, ended-only, removes data and reports partial failures', async () => {
+  const f = await fixture();
+  try {
+    const active = await f.create(); const ended = await f.create(); await f.rooms.end(ended);
+    const path = `/api/rooms/${ended.id}`;
+    assert.equal((await f.request(path, undefined, { method: 'DELETE' })).status, 401);
+    assert.equal((await f.request(path, undefined, { ...f.admin, method: 'DELETE', origin: 'https://attacker.test' })).status, 403);
+    assert.equal((await f.request(`/api/rooms/${active.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 409);
+    f.runtime.failRemove = true;
+    assert.equal((await f.request(path, undefined, { ...f.admin, method: 'DELETE' })).status, 502);
+    assert.equal(f.store.room(ended.id)?.status, 'ended');
+    f.runtime.failRemove = false;
+    const result = await (await f.request('/api/rooms/batch-delete', { ids: [active.id, ended.id] }, f.admin)).json();
+    assert.deepEqual(result.deleted, [ended.id]); assert.equal(result.failed[0].id, active.id);
+    assert.equal(f.store.room(ended.id), undefined); assert.ok(f.store.room(active.id));
+    assert.deepEqual(f.runtime.removed, [ended.id]);
+    assert.equal((await f.request(path, undefined, { ...f.admin, method: 'DELETE' })).status, 404);
+    assert.equal((await f.request('/api/rooms/batch-delete', { ids: [] }, f.admin)).status, 400);
+  } finally { await f.dispose(); }
+});
+
+test('batch export contains selected archives and a manifest; running rooms are rejected', async () => {
+  const f = await fixture(); const directory = mkdtempSync(join(tmpdir(), 'codingbox-bundle-test-'));
+  try {
+    const first = await f.create(); const second = await f.create(); const active = await f.create();
+    await f.rooms.end(first); await f.rooms.end(second);
+    assert.equal((await f.request('/api/rooms/batch-archive', { ids: [first.id] })).status, 401);
+    assert.equal((await f.request('/api/rooms/batch-archive', { ids: [first.id, active.id] }, f.admin)).status, 409);
+    const response = await f.request('/api/rooms/batch-archive', { ids: [first.id, second.id] }, f.admin);
+    assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/gzip');
+    const file = join(directory, 'bundle.tar.gz'); writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+    const files = execFileSync('tar', ['-tzf', file], { encoding: 'utf8' }).trim().split('\n');
+    assert.deepEqual(files.sort(), [`codingbox-${first.code}.tar.gz`, `codingbox-${second.code}.tar.gz`, 'manifest.json'].sort());
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'manifest.json'], { encoding: 'utf8' }));
+    assert.deepEqual(manifest.rooms.map((r: Room) => r.id), [first.id, second.id]);
+    assert.ok(!JSON.stringify(manifest).includes(first.password));
+    f.runtime.archive = () => spawn(process.execPath, ['-e', 'process.exit(1)']);
+    assert.equal((await f.request('/api/rooms/batch-archive', { ids: [first.id] }, f.admin)).status, 502);
+    assert.equal((await f.request(`/api/rooms/${first.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200, 'failed export must release its lease');
+  } finally { await f.dispose(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('download and deletion reservations cannot overlap', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  let releaseExport: (() => void) | undefined;
+  let completeRemoval: (() => void) | undefined;
+  try {
+    const r = await f.create(); await f.rooms.end(r);
+    const exportStarted = new Promise<void>(resolve => {
+      f.runtime.archive = () => {
+        const child = spawn(process.execPath, ['-e', 'process.stdin.once("data", () => process.stdout.write("archive"))'], { stdio: ['pipe', 'pipe', 'pipe'] });
+        releaseExport = () => child.stdin!.end('go'); resolve(); return child;
+      };
+    });
+    const downloading = f.request(`/api/rooms/${r.id}/archive`, undefined, f.admin);
+    await exportStarted;
+    assert.equal((await f.request(`/api/rooms/${r.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 409);
+    releaseExport!(); assert.equal(await (await downloading).text(), 'archive');
+    let started!: () => void;
+    const removing = new Promise<void>(resolve => { started = resolve; });
+    f.runtime.remove = () => new Promise<void>(resolve => { completeRemoval = resolve; started(); });
+    const deletion = f.request(`/api/rooms/${r.id}`, undefined, { ...f.admin, method: 'DELETE' });
+    await removing;
+    assert.equal((await f.request(`/api/rooms/${r.id}/archive`, undefined, f.admin)).status, 409);
+    completeRemoval!(); assert.equal((await deletion).status, 200);
+  } finally { releaseExport?.(); completeRemoval?.(); await f.dispose(); }
+});
+
+test('disconnecting an export stops its child and releases the deletion reservation', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    f.runtime.archive = () => {
+      child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']); started(); return child;
+    };
+    const request = httpRequest(`http://127.0.0.1:${f.port}/api/rooms/${room.id}/archive`, { headers: { Host: 'localhost:3000', Cookie: f.admin.cookie } });
+    request.on('error', () => {}); request.end();
+    await ready;
+    const closed = once(child!, 'close'); request.destroy(); await closed;
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+  } finally { child?.kill(); await f.dispose(); }
+});
+
+test('concurrent delete requests share one storage removal', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  let complete: (() => void) | undefined;
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    let calls = 0; let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    f.runtime.remove = () => new Promise<void>(resolve => { calls++; complete = resolve; started(); });
+    const first = f.rooms.remove(room.id); await ready;
+    const second = f.rooms.remove(room.id);
+    assert.equal(calls, 1); complete!(); await Promise.all([first, second]);
+    assert.equal(f.store.room(room.id), undefined);
+  } finally { complete?.(); await f.dispose(); }
+});
+
+test('export cancellation kills a stubborn child even after stdout closes', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    let outputClosed!: () => void;
+    const ready = new Promise<void>(resolve => { outputClosed = resolve; });
+    f.runtime.archive = () => {
+      child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); process.stdout.end(); process.stderr.write("ready"); setInterval(() => {}, 1000)']);
+      void Promise.all([once(child.stdout!, 'end'), once(child.stderr!, 'data')]).then(outputClosed);
+      return child;
+    };
+    const download = httpRequest(`http://127.0.0.1:${f.port}/api/rooms/${room.id}/archive`, { headers: { Host: 'localhost:3000', Cookie: f.admin.cookie } });
+    download.on('error', () => {}); download.end();
+    await ready;
+    const closed = once(child!, 'close', { signal: AbortSignal.timeout(5000) });
+    download.destroy(); await closed;
+    assert.equal(child!.signalCode, 'SIGKILL');
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+  } finally { child?.kill('SIGKILL'); await f.dispose(); }
 });

@@ -1,3 +1,4 @@
+import { createRoom } from './helpers.ts';
 import 'dotenv/config';
 import { test, expect } from '@playwright/test';
 import type { BrowserContext, Page } from '@playwright/test';
@@ -183,7 +184,7 @@ test('two browsers join, collaborate, receive LSP responses, end and download co
 
 test('switching languages updates both browsers and preserves each project', async ({ browser, page, baseURL }) => {
   await loginAdmin(page);
-  const created = await page.request.post('/api/rooms', { data: { title: `E2E switch ${Date.now()}`, language: 'go', minutes: 60 } });
+  const created = await createRoom(page.request, { title: `E2E switch ${Date.now()}`, language: 'go', minutes: 60 });
   expect(created.status()).toBe(202);
   const { room } = await created.json();
   const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
@@ -250,7 +251,7 @@ for (const language of ['python', 'typescript', 'go', 'cpp', 'rust'] as const) {
   test(`${language} starter has LSP and runs through the room terminal`, async ({ page, baseURL }) => {
     if (language === 'go') test.setTimeout(180_000);
     await loginAdmin(page);
-    const created = await page.request.post('/api/rooms', { data: { title: `E2E ${language} ${Date.now()}`, language, minutes: 60 } });
+    const created = await createRoom(page.request, { title: `E2E ${language} ${Date.now()}`, language, minutes: 60 });
     expect(created.status()).toBe(202);
     const { room } = await created.json();
     try {
@@ -343,7 +344,7 @@ test('one origin supports two room tabs with independent state and shared peers'
   const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
   try {
     for (let i = 0; i < 2; i++) {
-      const created = await page.request.post('/api/rooms', { data: { title: `Same-origin ${Date.now()} ${i}`, language: 'python', minutes: 60 } });
+      const created = await createRoom(page.request, { title: `Same-origin ${Date.now()} ${i}`, language: 'python', minutes: 60 });
       expect(created.status()).toBe(202); rooms.push((await created.json()).room);
     }
     await expect.poll(async () => {
@@ -418,7 +419,7 @@ test('one origin supports two room tabs with independent state and shared peers'
 test('Run reuses one shared terminal with fresh shells and preserves manual terminals', async ({ browser, page }) => {
   test.setTimeout(300_000);
   await loginAdmin(page);
-  const created = await page.request.post('/api/rooms', { data: { title: `E2E reusable Run ${Date.now()}`, language: 'python', minutes: 60 } });
+  const created = await createRoom(page.request, { title: `E2E reusable Run ${Date.now()}`, language: 'python', minutes: 60 });
   expect(created.status()).toBe(202);
   const { room } = await created.json();
   const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
@@ -504,7 +505,7 @@ test('Run reuses one shared terminal with fresh shells and preserves manual term
 test('room chat survives language switches and preserves multiline paste and input', async ({ browser, page }) => {
   test.setTimeout(180_000);
   await loginAdmin(page);
-  const created = await page.request.post('/api/rooms', { data: { title: `E2E room chat ${Date.now()}`, language: 'python', minutes: 60 } });
+  const created = await createRoom(page.request, { title: `E2E room chat ${Date.now()}`, language: 'python', minutes: 60 });
   expect(created.status()).toBe(202);
   const { room } = await created.json();
   const contexts = await Promise.all([browser.newContext(), browser.newContext()]);

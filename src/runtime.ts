@@ -8,6 +8,7 @@ export interface Runtime {
   stop(room: Room): Promise<void>;
   running(room: Room): Promise<number | null>;
   archive(room: Room): ReturnType<typeof spawn>;
+  remove(room: Room): Promise<void>;
 }
 
 export class DockerRuntime implements Runtime {
@@ -45,6 +46,13 @@ export class DockerRuntime implements Runtime {
       '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '32',
       '-v', `${room.volume}:/archive:ro`, '--entrypoint', 'tar', this.image,
       '-C', '/archive/project', '-czf', '-', '.'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+  async remove(room: Room): Promise<void> {
+    await this.stop(room);
+    try { await exec('docker', ['volume', 'rm', room.volume], { timeout: 30_000 }); }
+    catch (error) {
+      if (!/no such volume/i.test(String((error as { stderr?: string }).stderr))) throw error;
+    }
   }
 }
 

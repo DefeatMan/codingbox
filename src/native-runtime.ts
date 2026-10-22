@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile, open } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, open, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import type { Runtime } from './runtime.ts';
@@ -112,5 +112,14 @@ export class NativeRuntime implements Runtime {
   }
   archive(room: Room): ReturnType<typeof spawn> {
     return spawn('sudo', ['-n', '-u', userFor(room), 'tar', '-C', join(this.homeRoot, room.id, 'project'), '-czf', '-', '.'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+  async remove(room: Room): Promise<void> {
+    await this.stop(room);
+    await this.sudo('rm', '-rf', '--', join(this.homeRoot, room.id));
+    await rm(join(this.data, room.id), { recursive: true, force: true });
+    const user = userFor(room);
+    let exists = true;
+    try { await exec('id', ['-u', user]); } catch { exists = false; }
+    if (exists) await this.sudo('userdel', user);
   }
 }

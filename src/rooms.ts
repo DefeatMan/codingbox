@@ -1,9 +1,15 @@
 import { Store, type Room } from './store.ts';
 import { type Runtime, waitForEditor, wedeRequest } from './runtime.ts';
 
+export class RoomOperationError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 export class Rooms {
   private starts = new Map<string, Promise<void>>();
   private endings = new Map<string, Promise<void>>();
+  private deleting = new Map<string, Promise<void>>();
+  private archiveReaders = new Map<string, number>();
   onEnd: (id: string) => void = () => {};
   onReady: (room: Room & { port: number }) => Promise<void> = async () => {};
   constructor(readonly store: Store, readonly runtime: Runtime) {}
@@ -32,6 +38,38 @@ export class Rooms {
     if (existing) return existing;
     const task = this.finish(room).finally(() => this.endings.delete(room.id));
     this.endings.set(room.id, task);
+    return task;
+  }
+  private completedRoom(id: string): Room {
+    const room = this.store.room(id);
+    if (!room) throw new RoomOperationError(404, '面试记录不存在。');
+    if (room.status !== 'ended') throw new RoomOperationError(409, '请先结束面试。');
+    return room;
+  }
+  leaseArchives(ids: string[]) {
+    const rooms = ids.map(id => {
+      const room = this.completedRoom(id);
+      if (this.deleting.has(id)) throw new RoomOperationError(409, '记录正在删除，请稍后重试。');
+      return room;
+    });
+    for (const room of rooms) this.archiveReaders.set(room.id, (this.archiveReaders.get(room.id) ?? 0) + 1);
+    let released = false;
+    return { rooms, release: () => {
+      if (released) return;
+      released = true;
+      for (const room of rooms) {
+        const count = (this.archiveReaders.get(room.id) ?? 1) - 1;
+        if (count) this.archiveReaders.set(room.id, count); else this.archiveReaders.delete(room.id);
+      }
+    } };
+  }
+  async remove(id: string): Promise<void> {
+    const existing = this.deleting.get(id);
+    if (existing) return existing;
+    const room = this.completedRoom(id);
+    if (this.archiveReaders.has(id)) throw new RoomOperationError(409, '代码正在下载，请下载完成后再删除。');
+    const task = this.runtime.remove(room).then(() => this.store.deleteEndedRoom(id)).finally(() => this.deleting.delete(id));
+    this.deleting.set(id, task);
     return task;
   }
   private async finish(room: Room): Promise<void> {
@@ -94,5 +132,5 @@ export class Rooms {
       }
     }
   }
-  async settle(): Promise<void> { await Promise.all([...this.starts.values(), ...this.endings.values()]); }
+  async settle(): Promise<void> { await Promise.all([...this.starts.values(), ...this.endings.values(), ...this.deleting.values()]); }
 }

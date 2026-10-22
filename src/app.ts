@@ -7,7 +7,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { Store, hash, type Room } from './store.ts';
-import { Rooms } from './rooms.ts';
+import { Rooms, RoomOperationError } from './rooms.ts';
+import { sendArchives } from './archives.ts';
 import type { Runtime } from './runtime.ts';
 
 export interface Config {
@@ -152,10 +153,17 @@ export function createApplication(config: Config, runtime: Runtime) {
     res.clearCookie(adminCookie, { path: '/', secure, sameSite: 'strict' });
     res.json({ ok: true });
   });
-  app.get('/api/rooms', requireAdmin, (_req, res) => res.json({ rooms: store.rooms().map(publicRoom) }));
+  app.get('/api/rooms', requireAdmin, (req, res) => {
+    if (req.query.tab === undefined) return res.json({ rooms: store.rooms().map(publicRoom) });
+    const query = z.object({ tab: z.enum(['ongoing', 'completed']), q: z.string().trim().max(100).default(''),
+      page: z.coerce.number().int().min(1).max(1_000_000).default(1), pageSize: z.coerce.number().int().min(1).max(50).default(10),
+    }).parse(req.query);
+    const result = store.roomPage(query.tab, query.q, query.page, query.pageSize);
+    res.json({ ...result, rooms: result.rooms.map(publicRoom) });
+  });
   app.post('/api/rooms', requireAdmin, limiter(15), (req, res) => {
-    const body = z.object({ title: z.string().trim().min(1).max(80), language: z.enum(['python', 'typescript', 'go', 'cpp', 'rust']), minutes: z.number().int().min(15).max(480) }).parse(req.body);
-    if (store.rooms().filter(r => r.status !== 'ended').length >= config.maxRooms) return res.status(409).json({ error: '房间数量已达上限，请先结束已有房间。' });
+    const body = z.object({ title: z.string().trim().min(1).max(80), language: z.enum(['python', 'typescript', 'go', 'cpp', 'rust']).default('python'), minutes: z.number().int().min(15).max(480) }).parse(req.body);
+    if (store.roomCounts().ongoing >= config.maxRooms) return res.status(409).json({ error: '房间数量已达上限，请先结束已有房间。' });
     const room = store.createRoom(body.title, body.language, body.minutes);
     rooms.provision(room);
     res.status(202).json({ room: publicRoom(room) });
@@ -172,29 +180,32 @@ export function createApplication(config: Config, runtime: Runtime) {
     await rooms.end(room);
     res.json({ room: publicRoom(store.room(room.id)!) });
   });
-  app.get('/api/rooms/:id/archive', requireAdmin, (req, res) => {
-    const room = store.room(String(req.params.id));
-    if (!room) return res.status(404).json({ error: '房间不存在。' });
-    if (room.status !== 'ended') return res.status(409).json({ error: '请先结束面试再下载代码。' });
-    const child = runtime.archive(room);
-    res.setHeader('Content-Type', 'application/gzip');
-    res.setHeader('Content-Disposition', `attachment; filename="codingbox-${room.code}.tar.gz"`);
-    child.stdout!.pipe(res, { end: false });
-    child.stderr!.resume();
-    const fail = () => {
-      if (!res.headersSent) res.status(502).type('json').end(JSON.stringify({ error: '导出失败，请检查房间数据卷。' }));
-      else res.destroy();
-    };
-    child.on('error', fail);
-    child.on('close', code => { if (code === 0) res.end(); else fail(); });
-    const timeout = setTimeout(() => child.kill(), 60_000);
-    child.on('close', () => clearTimeout(timeout));
-    res.on('close', () => { if (child.exitCode === null) child.kill(); });
+  const selectedRooms = z.object({ ids: z.array(z.string().uuid()).min(1).max(50).transform(ids => [...new Set(ids)]) });
+  app.post('/api/rooms/batch-archive', requireAdmin, limiter(10), async (req, res) => {
+    const { ids } = selectedRooms.parse(req.body);
+    await sendArchives(runtime, rooms.leaseArchives(ids), res, true);
+  });
+  app.post('/api/rooms/batch-delete', requireAdmin, async (req, res) => {
+    const { ids } = selectedRooms.parse(req.body);
+    const deleted: string[] = []; const failed: { id: string; error: string }[] = [];
+    for (const id of ids) {
+      try { await rooms.remove(id); deleted.push(id); }
+      catch (error) { failed.push({ id, error: error instanceof RoomOperationError ? error.message : '删除失败，记录已保留，请重试。' }); }
+    }
+    res.json({ deleted, failed });
+  });
+  app.delete('/api/rooms/:id', requireAdmin, async (req, res) => {
+    await rooms.remove(z.string().uuid().parse(req.params.id));
+    res.json({ ok: true });
+  });
+  app.get('/api/rooms/:id/archive', requireAdmin, async (req, res) => {
+    await sendArchives(runtime, rooms.leaseArchives([String(req.params.id)]), res, false);
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在。' }));
   app.use(express.static(fileURLToPath(new URL('../public', import.meta.url)), { index: 'index.html' }));
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (res.headersSent) return res.end();
+    if (error instanceof RoomOperationError) return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError) return res.status(400).json({ error: '输入不正确，请检查名字、面试码或房间设置。' });
     if (error instanceof SyntaxError) return res.status(400).json({ error: '请求格式不正确。' });
     res.status(502).json({ error: '操作失败，请检查运行环境和编辑器状态后重试。' });

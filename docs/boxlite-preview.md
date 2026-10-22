@@ -73,8 +73,8 @@ boxlite exec --detach codingbox-dev -- sh /opt/codingbox/deploy/boxlite-boot.sh
 
 ## 数据与访问
 
-- 门户密码在 Box 的 `/opt/codingbox/.env`，权限 0600；本次任务生成的本地副本在 `.data/preview.env`，已被 Git 忽略。
+- 门户密码在 Box 的 `/opt/codingbox/.env`，权限 0600；dev 部署的独立密码保存在本地 `.data/dev-preview.env`，已被 Git 忽略。
 - `.data` 保存 SQLite、native 元数据和日志，权限 0700。
 - 源码在 `/srv/codingbox-rooms/<UUID>/project`，结束后保留。
-- 用户和 UID 随归档保留，避免后续房间复用 UID 后读取历史数据。清理归档时再人工删除对应用户与目录。
+- 用户和 UID 随归档保留。通过「已完成」删除记录时，会清理对应代码、元数据和系统用户；下载期间暂不能删除。
 - 候选人有该用户的 Shell；该模式不提供每房间网络、资源或内核隔离。

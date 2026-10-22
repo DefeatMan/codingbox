@@ -50,11 +50,21 @@
       <div class="dashboard-grid">
         <aside class="create-panel"><div class="panel-index">NEW SESSION</div><h2>创建面试</h2><form id="create-form">
           <label for="room-title">面试名称</label><input id="room-title" name="title" placeholder="例如：后端开发 · 第一轮" required maxlength="80">
-          <label for="room-language">编程语言</label><select id="room-language" name="language"><option value="python">Python</option><option value="typescript">TypeScript</option><option value="go">Go</option><option value="cpp">C++</option><option value="rust">Rust</option></select>
           <label for="room-duration">房间有效时间</label><select id="room-duration" name="minutes"><option value="60">1 小时</option><option value="120" selected>2 小时</option><option value="240">4 小时</option><option value="480">8 小时</option></select>
           <button type="submit" class="button primary wide"><span>创建编程空间</span><span>＋</span></button><p id="create-error" class="error" role="alert"></p>
-        </form><p class="small muted">有效期内可随时加入。结束后可下载代码。</p></aside>
-        <div class="room-section"><div class="room-list-heading"><div class="panel-index">YOUR SESSIONS</div><span id="room-count" class="muted small"></span></div><p id="list-error" class="error" role="alert"></p><div id="room-list"></div></div>
+        </form><p class="small muted">默认以 Python 开始，候选人进入后可自由切换语言。结束后可在面试记录中下载代码。</p></aside>
+        <div class="room-section">
+          <div class="room-list-heading"><div class="session-tabs" role="tablist" aria-label="面试记录">
+            <button id="tab-ongoing" type="button" role="tab" aria-selected="true" aria-controls="session-panel">进行中 <span id="ongoing-count">0</span></button>
+            <button id="tab-completed" type="button" role="tab" aria-selected="false" aria-controls="session-panel" tabindex="-1">已完成 <span id="completed-count">0</span></button>
+          </div><button id="refresh-rooms" class="button quiet" type="button">刷新</button></div>
+          <div id="session-panel" role="tabpanel" aria-labelledby="tab-ongoing">
+            <form id="search-form" class="history-search" hidden><label for="history-query" class="sr-only">查询面试记录</label><input id="history-query" name="q" type="search" placeholder="搜索面试名称或面试码" maxlength="100"><button type="submit" class="button">查询</button><button id="clear-search" type="button" class="button quiet">重置</button></form>
+            <div id="history-actions" class="history-actions" hidden><label class="select-page"><input id="select-page" type="checkbox">全选本页</label><span id="selection-count" class="muted small">已选 0 项</span><button id="download-selected" type="button" class="button" disabled>下载所选</button><button id="delete-selected" type="button" class="button danger" disabled>删除所选</button></div>
+            <p id="list-error" class="error" role="alert"></p><p id="list-loading" class="muted small" role="status" hidden>加载中…</p><span id="room-count" class="muted small"></span><div id="room-list"></div>
+            <div id="history-pagination" class="history-pagination" hidden><span id="page-info" class="muted small"></span><div><button id="previous-page" type="button" class="button">上一页</button><button id="next-page" type="button" class="button">下一页</button></div></div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -64,6 +74,7 @@
   <dialog id="login-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">INTERVIEWER ACCESS</div><h2>面试官登录</h2><p class="muted">登录后创建和管理面试空间。</p><form id="login-form"><label for="admin-password">面试官密码</label><input id="admin-password" name="password" type="password" required autocomplete="current-password"><button class="button primary wide" type="submit">登录工作台 ↗</button><p id="login-error" class="error" role="alert"></p></form></dialog>
   <dialog id="enter-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">ENTER YOUR SESSION</div><h2>进入面试</h2><form id="enter-form"><label for="interviewer-name">你的名字</label><input id="interviewer-name" name="name" value="面试官" required maxlength="32"><button class="button primary wide" type="submit">进入编程空间 ↗</button><p id="enter-error" class="error" role="alert"></p></form></dialog>
   <dialog id="end-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">END SESSION</div><h2>结束这场面试？</h2><p class="muted">所有参与者将断开连接，代码会保留供下载。</p><form id="end-form"><button class="button danger wide" type="submit">结束面试</button><p id="end-error" class="error" role="alert"></p></form></dialog>
+  <dialog id="delete-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><div class="panel-index">DELETE RECORDS</div><h2>删除面试记录？</h2><p id="delete-summary"></p><p class="muted">面试记录和对应代码将永久删除，无法恢复。</p><form id="delete-form"><button class="button danger wide" type="submit">确认删除</button><p id="delete-error" class="error" role="alert"></p></form></dialog>
   <div id="toast" role="status" hidden></div>
 </body>
 </html>

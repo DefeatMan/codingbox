@@ -36,6 +36,7 @@ export class Store {
         expiresAt INTEGER NOT NULL, wedeToken TEXT
       );
       CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expiresAt);
+      CREATE INDEX IF NOT EXISTS rooms_history ON rooms(status, COALESCE(endedAt, createdAt) DESC, id DESC);
     `);
   }
   createRoom(title: string, language: string, minutes: number): Room {
@@ -57,6 +58,29 @@ export class Store {
     return room;
   }
   rooms(): Room[] { return this.db.prepare('SELECT * FROM rooms ORDER BY createdAt DESC').all() as unknown as Room[]; }
+  roomCounts(): { ongoing: number; completed: number } {
+    const row = this.db.prepare("SELECT COUNT(*) AS total, COUNT(CASE WHEN status = 'ended' THEN 1 END) AS completed FROM rooms").get() as { total: number; completed: number };
+    return { ongoing: row.total - row.completed, completed: row.completed };
+  }
+  roomPage(tab: 'ongoing' | 'completed', query: string, requestedPage: number, pageSize: number) {
+    const where = `status ${tab === 'completed' ? '=' : '!='} 'ended' AND (instr(lower(title), lower(?)) > 0 OR instr(code, NULLIF(?, '')) > 0)`;
+    const params = [query, query.replaceAll('-', '').toUpperCase()];
+    const { total } = this.db.prepare(`SELECT COUNT(*) AS total FROM rooms WHERE ${where}`).get(...params) as { total: number };
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, pages);
+    const rooms = this.db.prepare(`SELECT * FROM rooms WHERE ${where} ORDER BY COALESCE(endedAt, createdAt) DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(...params, pageSize, (page - 1) * pageSize) as unknown as Room[];
+    return { rooms, total, page, pageSize, pages, counts: this.roomCounts() };
+  }
+  deleteEndedRoom(id: string): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.db.prepare("DELETE FROM rooms WHERE id = ? AND status = 'ended'").run(id);
+      if (result.changes !== 1) throw new Error('Completed room is no longer available');
+      this.revokeRoom(id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   room(id: string): Room | undefined { return this.db.prepare('SELECT * FROM rooms WHERE id = ?').get(id) as unknown as Room | undefined; }
   byCode(code: string): Room | undefined { return this.db.prepare('SELECT * FROM rooms WHERE code = ?').get(code.replaceAll('-', '').toUpperCase()) as unknown as Room | undefined; }
   update(id: string, changes: Partial<Pick<Room, 'status' | 'port' | 'endedAt' | 'error'>>): void {
