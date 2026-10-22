@@ -514,13 +514,19 @@ test('room chat survives language switches and preserves multiline paste and inp
     const peers = await Promise.all(contexts.map(context => context.newPage()));
     let disconnectViewerChat: (() => void) | undefined;
     for (const peer of peers) {
+      let releaseHistory: (() => void) | undefined;
+      let historyReleased = false;
+      const heldFrames: (() => void)[] = [];
       await peer.routeWebSocket(/\/api\/interview\/chat(?:\?|$)/, socket => {
         if (peer === peers[1]) disconnectViewerChat = () => socket.close({ code: 1012, reason: 'E2E reconnect' });
         const server = socket.connectToServer();
         server.onMessage(message => {
-          if (JSON.parse(String(message)).type === 'history') {
-            setTimeout(() => { try { socket.send(message); } catch { /* page closed */ } }, 600);
-          } else socket.send(message);
+          const deliver = () => { try { socket.send(message); } catch { /* page closed */ } };
+          if (!historyReleased) {
+            heldFrames.push(deliver);
+            if (JSON.parse(String(message)).type === 'history') releaseHistory = () => heldFrames.splice(0).forEach(send => send());
+          } else if (JSON.parse(String(message)).type === 'history') setTimeout(deliver, 600);
+          else deliver();
         });
       });
       await peer.goto(room.joinUrl);
@@ -529,8 +535,10 @@ test('room chat survives language switches and preserves multiline paste and inp
       await expect(peer.getByPlaceholder('Message…', { exact: false })).toBeVisible();
       await expect(peer.getByRole('status')).toHaveText('Loading…');
       await expect(peer.getByText('No messages yet', { exact: true })).toHaveCount(0);
+      await expect.poll(() => !!releaseHistory).toBe(true);
+      historyReleased = true; releaseHistory!();
       await expect(peer.getByRole('status')).toHaveCount(0, { timeout: 20_000 });
-      await expect(peer.getByText('No messages yet', { exact: true })).toBeVisible();
+      await expect(peer.getByRole('note').first()).toBeVisible();
     }
     const [author, viewer] = peers;
     const input = author.getByPlaceholder('Message…', { exact: false });
@@ -572,5 +580,152 @@ test('room chat survives language switches and preserves multiline paste and inp
   } finally {
     await Promise.allSettled(contexts.map(context => context.close()));
     await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+  }
+});
+
+test('chat stays connected outside its panel and shows unread user messages', async ({ browser, page }) => {
+  test.setTimeout(120_000);
+  await loginAdmin(page);
+  const created = await createRoom(page.request, { title: `E2E persistent chat ${Date.now()}`, minutes: 60 });
+  expect(created.status()).toBe(202);
+  const { room } = await created.json();
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
+  try {
+    await expect.poll(async () => (await (await page.request.get('/api/rooms')).json()).rooms.find((r: { id: string }) => r.id === room.id).status, { timeout: 60_000 }).toBe('active');
+    const [author, viewer] = await Promise.all(contexts.map(context => context.newPage()));
+    let connections = 0, closures = 0, histories = 0;
+    viewer.on('websocket', socket => {
+      if (!socket.url().includes('/api/interview/chat')) return;
+      connections++;
+      socket.on('close', () => closures++);
+      socket.on('framereceived', frame => { if (JSON.parse(String(frame.payload)).type === 'history') histories++; });
+    });
+    // Same display name must not suppress notifications from another participant.
+    await Promise.all([author.goto(room.joinUrl + '?name=Candidate'), viewer.goto(room.joinUrl + '?name=Candidate')]);
+    await expect.poll(() => histories).toBe(1);
+    const icon = viewer.getByTitle('Chat', { exact: true });
+    await expect(icon).toHaveAccessibleName('Chat');
+    await author.getByTitle('Chat', { exact: true }).click();
+    const input = author.getByPlaceholder('Message…', { exact: false });
+    await expect(author.getByRole('status')).toHaveCount(0);
+    const send = async (text: string) => {
+      await input.fill(text); await author.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect(author.locator('p').filter({ hasText: text })).toBeVisible();
+    };
+    await send('persistent first');
+    await expect(icon).toHaveAccessibleName('Chat (1 条未读消息)');
+    await send('persistent second');
+    await expect(icon).toHaveAccessibleName('Chat (2 条未读消息)');
+    await icon.click();
+    await expect(viewer.locator('p').filter({ hasText: 'persistent second' })).toBeVisible();
+    await expect(icon).toHaveAccessibleName('Chat');
+    await expect(viewer.getByRole('status')).toHaveCount(0);
+    await send('persistent chat visible');
+    await expect(viewer.locator('p').filter({ hasText: 'persistent chat visible' })).toBeVisible();
+    await expect(icon).toHaveAccessibleName('Chat');
+    // Control the browser visibility boundary without relying on headless focus.
+    await viewer.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await send('persistent background tab');
+    await expect(icon).toHaveAccessibleName('Chat (1 条未读消息)');
+    await viewer.evaluate(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect(icon).toHaveAccessibleName('Chat');
+    // Collapsing the sidebar used to unmount the owner of the socket.
+    await icon.click();
+    await send('persistent sidebar hidden');
+    await expect(icon).toHaveAccessibleName('Chat (1 条未读消息)');
+    await viewer.getByLabel('编程语言', { exact: true }).selectOption('go');
+    await expect(viewer.getByLabel('编程语言', { exact: true })).toHaveValue('go');
+    await expect(icon).toHaveAccessibleName('Chat (1 条未读消息)');
+    await viewer.getByTitle('Explorer', { exact: true }).click();
+    await send('persistent explorer visible');
+    await expect(icon).toHaveAccessibleName('Chat (2 条未读消息)');
+    await icon.click();
+    await expect(viewer.locator('p').filter({ hasText: 'persistent explorer visible' })).toBeVisible();
+    await expect(icon).toHaveAccessibleName('Chat');
+    expect(connections).toBe(1); expect(closures).toBe(0); expect(histories).toBe(1);
+  } finally {
+    await Promise.allSettled(contexts.map(context => context.close()));
+    await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+    await page.request.delete(`/api/rooms/${room.id}`);
+  }
+});
+
+test('public chat shows member arrivals and departures with a centered loading overlay', async ({ browser, page }) => {
+  test.setTimeout(120_000);
+  await loginAdmin(page);
+  const created = await createRoom(page.request, { title: `E2E chat members ${Date.now()}`, minutes: 60 });
+  expect(created.status()).toBe(202);
+  const { room } = await created.json();
+  const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
+  try {
+    await expect.poll(async () => (await (await page.request.get('/api/rooms')).json()).rooms.find((r: { id: string }) => r.id === room.id).status, { timeout: 60_000 }).toBe('active');
+    const observer = await contexts[0].newPage();
+    let disconnect: (() => void) | undefined, release: (() => void) | undefined;
+    let holdHistory = false, histories = 0;
+    const heldReconnectFrames: (() => void)[] = [];
+    await observer.routeWebSocket(/\/api\/interview\/chat(?:\?|$)/, socket => {
+      disconnect = () => socket.close({ code: 1012, reason: 'E2E centered loading' });
+      const server = socket.connectToServer();
+      server.onMessage(message => {
+        if (JSON.parse(String(message)).type === 'history') {
+          histories++;
+          if (holdHistory) {
+            heldReconnectFrames.push(() => socket.send(message));
+            release = () => { holdHistory = false; heldReconnectFrames.splice(0).forEach(send => send()); };
+            return;
+          }
+        }
+        if (holdHistory) heldReconnectFrames.push(() => socket.send(message));
+        else socket.send(message);
+      });
+    });
+    await observer.goto(room.joinUrl + '?name=Observer');
+    await observer.getByTitle('Chat', { exact: true }).click();
+    await expect(observer.getByText('Observer 已上线', { exact: true })).toBeVisible();
+    await expect(observer.getByRole('button', { name: 'private', exact: true })).toHaveCount(0);
+    const privateStatus = await observer.evaluate(async () => {
+      const code = location.pathname.split('/')[2];
+      const token = localStorage.getItem(`codingbox:${code}:wede_token`)!;
+      return (await fetch(location.pathname + 'api/interview/chat?channel=private', { headers: { Authorization: token } })).status;
+    });
+    expect(privateStatus).toBe(400);
+    const member = await contexts[1].newPage();
+    await member.goto(room.joinUrl + '?name=Candidate');
+    await expect(observer.getByText('Candidate 已上线', { exact: true })).toHaveCount(1);
+    await expect(observer.getByTitle('Chat', { exact: true })).toHaveAccessibleName('Chat');
+    await member.getByLabel('编程语言', { exact: true }).selectOption('rust');
+    await member.getByTitle('Chat', { exact: true }).click();
+    await member.getByTitle('Explorer', { exact: true }).click();
+    // Reusing one authenticated browser session in another tab is one member.
+    const duplicate = await contexts[1].newPage(); await duplicate.goto(room.joinUrl);
+    await expect(duplicate.getByLabel('编程语言', { exact: true })).toHaveValue('rust');
+    await member.close();
+    await expect(observer.getByText('Candidate 已上线', { exact: true })).toHaveCount(1);
+    await duplicate.close();
+    await expect(observer.getByText('Candidate 已离开', { exact: true })).toBeVisible({ timeout: 10_000 });
+    const row = observer.getByText('Candidate 已上线', { exact: true });
+    const before = await row.boundingBox();
+    holdHistory = true; expect(disconnect).toBeDefined(); disconnect!();
+    const loading = observer.getByRole('status'); await expect(loading).toHaveText('Loading…');
+    await expect.poll(() => !!release).toBe(true);
+    const during = await row.boundingBox();
+    expect(during!.y).toBeCloseTo(before!.y, 0);
+    const overlay = await loading.locator('span').boundingBox(); const list = await observer.getByTestId('chat-messages').boundingBox();
+    expect(overlay!.y + overlay!.height / 2).toBeCloseTo(list!.y + list!.height / 2, 0);
+    expect(overlay!.x + overlay!.width / 2).toBeCloseTo(list!.x + list!.width / 2, 0);
+    release!(); await expect(loading).toHaveCount(0);
+    await expect(observer.getByText('Observer 已上线', { exact: true })).toHaveCount(1);
+    await expect(observer.getByText('Observer 已离开', { exact: true })).toHaveCount(0);
+    expect(histories).toBe(2);
+  } finally {
+    await Promise.allSettled(contexts.map(context => context.close()));
+    await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+    await page.request.delete(`/api/rooms/${room.id}`);
   }
 });

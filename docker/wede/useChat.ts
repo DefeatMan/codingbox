@@ -10,17 +10,21 @@ export function useChat(
   token: string | null | undefined,
   username: string | null | undefined,
   color: string | null | undefined,
-  channel = 'public',
+  visible = false,
 ) {
-  const key = `${roomBase}:${channel}:${token || ''}`
+  const key = `${roomBase}:public:${token || ''}`
   const [messages, setMessages] = useState<ChatMessage[]>(() => cache.get(key) || [])
   const [status, setStatus] = useState<Status>('loading')
+  const [unread, setUnread] = useState(0)
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
   const wsRef = useRef<WebSocket | null>(null)
   const ready = useRef(false)
 
   useEffect(() => {
     setMessages(cache.get(key) || [])
     setStatus('loading')
+    setUnread(0)
     ready.current = false
     if (!token) return
     let disposed = false
@@ -31,7 +35,7 @@ export function useChat(
       if (disposed) return
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
       const host = ['5173', '5174'].includes(location.port) ? location.hostname + ':9090' : location.host
-      const url = `${proto}//${host}${roomPath('/api/interview/chat')}?channel=${encodeURIComponent(channel)}&color=${encodeURIComponent(color || '#888888')}`
+      const url = `${proto}//${host}${roomPath('/api/interview/chat')}?color=${encodeURIComponent(color || '#888888')}`
       const ws = new WebSocket(url, [`auth.${token}`])
       wsRef.current = ws
       ws.onmessage = event => {
@@ -45,6 +49,9 @@ export function useChat(
             setStatus('ready')
           } else if (frame.type === 'msg' && frame.message) {
             publish([...(cache.get(key) || []), frame.message])
+            if (frame.message.kind === 'user' && (!visibleRef.current || document.visibilityState !== 'visible')) {
+              setUnread(count => count + 1)
+            }
           } else if (frame.type === 'activity' && Array.isArray(frame.messages)) {
             const current = cache.get(key) || []
             // Legacy user IDs use second-precision timestamps and can collide.
@@ -75,7 +82,17 @@ export function useChat(
       wsRef.current = null
       ws?.close()
     }
-  }, [key, token, username, color, channel])
+  }, [key, token, username, color])
+
+  // Visibility changes affect read state, never the connection lifetime.
+  useEffect(() => {
+    const markRead = () => {
+      if (visible && document.visibilityState === 'visible') setUnread(0)
+    }
+    markRead()
+    document.addEventListener('visibilitychange', markRead)
+    return () => document.removeEventListener('visibilitychange', markRead)
+  }, [visible, key])
 
   const sendMessage = useCallback((text: string | null | undefined): boolean => {
     const ws = wsRef.current
@@ -84,5 +101,5 @@ export function useChat(
     catch { return false }
   }, [])
 
-  return { messages, sendMessage, status }
+  return { messages, sendMessage, status, unread }
 }

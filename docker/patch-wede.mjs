@@ -234,30 +234,56 @@ edit('backend/internal/lsp/lsp.go', source => {
 });
 
 // Chat is room-wide; legacy language histories retain their original records.
-for (const path of ['room_history.go', 'room_history_test.go', 'room_chat.go', 'room_chat_test.go', 'chat_multiline_test.go']) {
+for (const path of ['room_history.go', 'room_history_test.go', 'room_chat.go', 'room_chat_test.go', 'room_presence.go', 'room_presence_test.go', 'chat_multiline_test.go']) {
   writeFileSync(join(root, 'backend/internal/chat', path), readFileSync(join(overlays, path)));
 }
 writeFileSync(join(root, 'web/src/hooks/useChat.ts'), readFileSync(join(overlays, 'useChat.ts')));
 edit('web/src/components/Chat.tsx', source => {
   source = removeBetween(source, '        {workspaceName && (', '      </div>\n\n      {/* ── Message list', '        <div className="text-[10px] text-text-muted">房间聊天 · 所有语言共享</div>\n');
   source = replace(source, "const text = input.trim()\n    if (!text) return", "const text = input\n    if (!text.trim()) return");
-  source = replace(source, 'const { messages, sendMessage } = useChat(', 'const { messages, sendMessage, status } = useChat(');
+  source = replace(source, "import { useChat }", "import type { useChat }");
+  source = removeBetween(source, 'export interface ChatProps {', 'type GitClassification =', `export interface ChatProps {
+  chat: ReturnType<typeof useChat>
+}
+
+`);
+  source = replace(source, 'export default function Chat({ workspaceId, workspaceName, token, username, color }: ChatProps) {', 'export default function Chat({ chat }: ChatProps) {');
+  source = replace(source, "  const [channel, setChannel] = useState('public')\n", '');
+  source = replace(source, 'const { messages, sendMessage } = useChat(workspaceId, token, username, color, channel)', 'const { messages, sendMessage, status } = chat');
   source = replace(source, '    sendMessage(text)', '    if (!sendMessage(text)) return');
   source = replace(source, 'disabled={!input.trim()}', "disabled={!input.trim() || status !== 'ready'}");
-  source = replace(source, '{rows.length === 0 ? (', `{rows.length === 0 && status !== 'ready' ? (
-          <div role="status" className="flex items-center justify-center h-full text-text-muted text-xs">{status === 'error' ? '连接失败，正在重试…' : 'Loading…'}</div>
-        ) : rows.length === 0 ? (`);
-  source = replace(source, '<div ref={listRef}', `{status !== 'ready' && rows.length > 0 && <div role="status" className="px-3 py-1 text-xs text-text-muted">Loading…</div>}
-      <div ref={listRef}`);
+  source = replace(source, "| 'churn'", "| 'churn' | 'system'");
+  source = replace(source, "      if (showAllGit) out.push({ ...msg, _row: 'churn' })", "      out.push({ ...msg, _row: 'system' })");
+  source = replace(source, "if (row._row === 'commit')", "if (row._row === 'system') return <div key={row.id || i} role=\"note\" className=\"px-3 py-1 text-center text-[11px] text-text-muted break-words\">{row.text}</div>\n              if (row._row === 'commit')");
+  source = removeBetween(source, '          <div className="inline-flex rounded-md border border-border overflow-hidden shrink-0">', '          <button\n            onClick={() => setShowAllGit', '          <span className="text-[10px] font-semibold text-text-muted uppercase">Public</span>\n');
+  source = replace(source, "{channel === 'public' ? 'No messages yet' : 'No private messages yet'}", "No messages yet");
+  source = replace(source, "{channel === 'public'\n                ? 'Public chat is committed to .wede/chat.md so the repo and LLMs can read it'\n                : 'Private chat stays local in .wede/private/ (gitignored)'}", '房间内所有参与者共享聊天记录');
+  source = replace(source, '{rows.length === 0 ? (', "{rows.length === 0 && status === 'ready' ? (");
+  source = replace(source, '<div ref={listRef} className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 py-1">', `<div className="relative flex-1 min-h-0" data-testid="chat-messages">
+        {status !== 'ready' && <div role="status" className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none"><span className="rounded-md bg-bg-secondary/90 border border-border px-3 py-1.5 text-xs text-text-muted">{status === 'error' ? '连接失败，正在重试…' : 'Loading…'}</span></div>}
+        <div ref={listRef} className="h-full overflow-y-auto overflow-x-hidden py-1">`);
+  source = replace(source, '      {/* ── Input ── */}', '      </div>\n\n      {/* ── Input ── */}');
   return replace(source, "if (e.key === 'Enter' && !e.shiftKey)", "if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229)");
+});
+// The IDE owns the connection so conditional sidebar panels can unmount freely.
+edit('web/src/components/IDE.tsx', source => {
+  source = replace(source, "import Chat from './Chat'", "import Chat from './Chat'\nimport { useChat } from '../hooks/useChat'");
+  source = replace(source, "  const [sidebarTab, setSidebarTab] = useState('files')", `  const [sidebarTab, setSidebarTab] = useState('files')
+  const chat = useChat(workspaceId, token, username, colorFromName(username), !isMobile && showSidebar && sidebarTab === 'chat')`);
+  source = replace(source, '<Chat workspaceId={workspaceId} workspaceName={(workspacesApi?.workspaces || []).find((w) => w.id === workspaceId)?.name} token={token} username={username} color={colorFromName(username)} />', '<Chat chat={chat} />');
+  source = replace(source, '            title="Chat"', '            title="Chat"\n            badge={chat.unread}');
+  return replace(source, '      title={title}\n', '      title={title}\n      aria-label={badge ? `${title} (${badge} 条未读消息)` : title}\n');
 });
 edit('backend/internal/chat/chat.go', source => {
   source = replace(source, '"sort"', '"sort"\n "strconv"\n "context"');
   source = replace(source, '\tpeers := make([]*peer, 0, len(h.peers))\n\tfor _, p := range h.peers {\n\t\tpeers = append(peers, p)\n\t}', '\tpeers := make(map[string]*peer,len(h.peers))\n for id,p:=range h.peers { peers[id]=p }');
   source = replace(source, '\tfor _, p := range peers {\n\t\tselect {', '\th.mu.Lock()\n defer h.mu.Unlock()\n for id,p:=range peers {\n  if h.peers[id]!=p { continue }\n\t\tselect {');
-  source = replace(source, 'type Hub struct {', 'type Hub struct {\n activityMu sync.Mutex\n activity []Message\n activityAt time.Time');
+  source = replace(source, 'type Hub struct {', 'type Hub struct {\n activityMu sync.Mutex\n activity []Message\n activityAt time.Time\n roomMembers map[string]*roomMember\n roomPeerMembers map[string]string');
   source = replace(source, 'func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {', 'func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) { h.handleWS(w,r,false) }\n\nfunc (h *Hub) handleWS(w http.ResponseWriter, r *http.Request, room bool) {');
   source = replace(source, 'id, out := h.Join(username, color)', 'var id string\n var out <-chan []byte\n if room { id,out = h.JoinRoom(username,color) } else { id,out = h.Join(username,color) }');
+  source = replace(source, '\tstop := make(chan struct{})', '\tif room { h.joinRoomMember(id, roomIdentity(r), username) }\n\tstop := make(chan struct{})');
+  source = replace(source, '\th.Leave(id)', '\tif room { h.leaveRoomMember(id) }\n\th.Leave(id)');
+  source = replace(source, '\th.closed = true', '\th.closed = true\n h.cancelRoomPresenceLocked()');
   source = replace(source, 'out, err := exec.Command("git", fullArgs...).Output()', 'ctx,cancel:=context.WithTimeout(context.Background(),3*time.Second)\n defer cancel()\n cmd:=exec.CommandContext(ctx,"git",fullArgs...)\n cmd.WaitDelay=time.Second\n out,err:=cmd.Output()');
   source = replace(source, 'kind := kbracket[1 : len(kbracket)-1]', 'kind := kbracket[1 : len(kbracket)-1]\n encoded := kind == "user-json"\n if encoded { kind = "user" }');
   source = replace(source, '\treturn msg, true', '\tif encoded {\n  text, err := strconv.Unquote(msg.Text)\n  if err != nil { return Message{}, false }\n  msg.Text = text\n }\n return msg, true');
@@ -321,3 +347,7 @@ edit('web/src/hooks/useLSP.ts', source => "import { roomPath } from '../roomScop
 edit('web/src/components/Terminal.tsx', source => "import { roomPath } from '../roomScope'\n" + replace(source, '${host}${path}', '${host}${roomPath(path)}'));
 edit('web/src/components/IDE.tsx', source => "import { roomPath } from '../roomScope'\n" + replace(source, 'new EventSource(url)', 'new EventSource(roomPath(url))'));
 edit('web/src/components/Logo.tsx', source => "import { roomPath } from '../roomScope'\n" + replace(source, 'src={src}', 'src={roomPath(src)}'));
+
+edit('backend/cmd/wede/main.go', source => replace(source,
+  'return func(w http.ResponseWriter, r *http.Request) { ws.Chat(r.URL.Query().Get("channel")).HandleWS(w, r) }',
+  'return func(w http.ResponseWriter, r *http.Request) { if channel := r.URL.Query().Get("channel"); channel != "" && channel != "public" { http.Error(w,"Only public chat is available",http.StatusBadRequest); return }; ws.Chat("public").HandleWS(w,r) }'));

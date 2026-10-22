@@ -252,6 +252,10 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 
 // Chat remains attached to the initial project, independent of selected language.
 func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
+	if channel := r.URL.Query().Get("channel"); channel != "" && channel != "public" {
+		http.Error(w, "Only public room chat is available", http.StatusBadRequest)
+		return
+	}
 	h.mu.Lock()
 	ws, err := h.workspace(h.state.Initial)
 	h.mu.Unlock()
@@ -259,5 +263,5 @@ func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Room chat unavailable", 503)
 		return
 	}
-	ws.Chat(r.URL.Query().Get("channel")).HandleRoomWS(w, r)
+	ws.Chat("public").HandleRoomWS(w, r)
 }

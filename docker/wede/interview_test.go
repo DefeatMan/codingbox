@@ -122,3 +122,12 @@ func TestRunRejectsStaleLanguageAndIgnoresClientCommand(t *testing.T) {
 		t.Fatal("client supplied command executed")
 	}
 }
+
+func TestRoomChatRejectsPrivateChannel(t *testing.T) {
+	h := &Handler{}
+	response := httptest.NewRecorder()
+	h.Chat(response, httptest.NewRequest("GET", "/api/interview/chat?channel=private", nil))
+	if response.Code != 400 {
+		t.Fatalf("private channel was not rejected: %d", response.Code)
+	}
+}
