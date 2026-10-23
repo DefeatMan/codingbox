@@ -1,13 +1,16 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Room } from './store.ts';
 
 const exec = promisify(execFile);
+export type ArchiveProcess = ReturnType<typeof spawn> & { cleanup?(): Promise<void> };
 export interface Runtime {
   start(room: Room): Promise<number>;
   stop(room: Room): Promise<void>;
   running(room: Room): Promise<number | null>;
-  archive(room: Room): ReturnType<typeof spawn>;
+  archive(room: Room): ArchiveProcess;
   remove(room: Room): Promise<void>;
 }
 
@@ -41,11 +44,27 @@ export class DockerRuntime implements Runtime {
       if (!String((error as { stderr?: string }).stderr).includes('No such')) throw error;
     }
   }
-  archive(room: Room): ReturnType<typeof spawn> {
-    return spawn('docker', ['run', '--rm', '--network', 'none', '--cap-drop', 'ALL',
+  archive(room: Room): ArchiveProcess {
+    const name = `codingbox-export-${randomUUID()}`;
+    const child: ArchiveProcess = spawn('docker', ['run', '--rm', '--init', '--name', name, '--network', 'none', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '32',
       '-v', `${room.volume}:/archive:ro`, '--entrypoint', 'tar', this.image,
       '-C', '/archive/project', '-czf', '-', '.'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.cleanup = async () => {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        try { await exec('docker', ['rm', '-f', name], { timeout: Math.max(1, deadline - Date.now()) }); return; }
+        catch (error) {
+          const stderr = String((error as { stderr?: string }).stderr);
+          if (stderr.includes('No such')) return;
+          // --rm and explicit cancellation can race inside the Docker daemon.
+          // Keep the lease until that existing removal has actually finished.
+          if (!/removal .*already in progress/i.test(stderr) || Date.now() >= deadline) throw error;
+          await delay(100);
+        }
+      }
+    };
+    return child;
   }
   async remove(room: Room): Promise<void> {
     await this.stop(room);

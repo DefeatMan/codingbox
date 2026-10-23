@@ -91,7 +91,7 @@ function action(label, handler, className = '') {
   };
   return button;
 }
-const statuses = { starting: '准备中', active: '进行中', ending: '结束中', ended: '已结束', error: '需要处理' };
+const statuses = { starting: '准备中', recovering: '恢复中', active: '进行中', ending: '结束中', ended: '已结束', error: '需要处理' };
 const displayTime = value => new Date(value).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 function roomCard(room) {
   const card = node('article', 'room-card'); card.dataset.roomId = room.id;
@@ -164,14 +164,9 @@ $('#download-selected').onclick = async () => {
   const ids = [...selected]; exporting = true; updateSelection();
   $('#download-selected').textContent = '正在打包…';
   try {
-    const response = await fetch('/api/rooms/batch-archive', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
-    });
-    if (!response.ok) throw new Error((await response.json()).error || '下载失败，请重试。');
-    const url = URL.createObjectURL(await response.blob());
+    const { url } = await api('/api/rooms/batch-archive', { ids, delivery: 'download' });
     const link = document.createElement('a'); link.href = url; link.download = 'codingbox-interviews.tar.gz';
     document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   } catch (error) { toast(error.message); }
   finally { exporting = false; $('#download-selected').textContent = '下载所选'; updateSelection(); }
 };

@@ -68,7 +68,7 @@ export class NativeRuntime implements Runtime {
     child.unref(); await log.close();
   }
   async running(room: Room): Promise<number | null> {
-    if (room.status !== 'active') return null;
+    if (room.status !== 'active' && room.status !== 'recovering') return null;
     const existing = this.recovering.get(room.id);
     if (existing) return existing;
     const task = this.recover(room).finally(() => this.recovering.delete(room.id));
@@ -97,7 +97,10 @@ export class NativeRuntime implements Runtime {
       }
       this.reserved.add(port);
       return port;
-    } catch { return null; }
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') return null;
+      throw error;
+    }
   }
   async stop(room: Room): Promise<void> {
     try { await exec('id', ['-u', userFor(room)]); } catch { return; }

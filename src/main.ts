@@ -10,13 +10,15 @@ if (!password || password.length < 12 || password === 'replace-with-a-long-rando
 }
 const port = Number(process.env.PORT ?? 3000);
 const maxRooms = Number(process.env.MAX_ACTIVE_ROOMS ?? 5);
+const maxExports = Number(process.env.MAX_CONCURRENT_EXPORTS ?? 2);
 if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(maxRooms) || maxRooms < 1) throw new Error('Invalid PORT or MAX_ACTIVE_ROOMS');
+if (!Number.isInteger(maxExports) || maxExports < 1) throw new Error('Invalid MAX_CONCURRENT_EXPORTS');
 const runtime = process.env.RUNTIME === 'native'
   ? new NativeRuntime(process.env.WEDE_BINARY ?? './bin/wede', './templates', resolve(process.env.DATA_DIR ?? '.data', 'native'))
   : new DockerRuntime(process.env.WEDE_IMAGE ?? 'codingbox-wede:local', process.env.ROOM_MEMORY ?? '1g', process.env.ROOM_CPUS ?? '1');
 const application = createApplication({
   publicUrl: process.env.PUBLIC_URL ?? `http://localhost:${port}`, adminPassword: password,
-  dataDir: resolve(process.env.DATA_DIR ?? '.data'), maxRooms,
+  dataDir: resolve(process.env.DATA_DIR ?? '.data'), maxRooms, maxExports,
 }, runtime);
 await application.rooms.reconcile();
 application.server.listen(port, process.env.HOST ?? '127.0.0.1', () => {
@@ -26,7 +28,10 @@ let sweeping = false;
 const timer = setInterval(async () => {
   if (sweeping) return;
   sweeping = true;
-  try { await application.rooms.sweep(); } finally { sweeping = false; }
+  const startedAt = Date.now();
+  try { await application.rooms.sweep(); }
+  catch (error) { application.log({ operation: 'room.sweep', startedAt, error }); }
+  finally { sweeping = false; }
 }, 15_000);
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => {

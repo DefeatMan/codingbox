@@ -15,12 +15,25 @@ export function useTerminals(authFetch: AuthFetch | null | undefined, workspaceI
   const termRefs = useRef<Record<number, TerminalHandle>>({})
   const initialCommands = useRef(new Map<number, string>())
   const revision = useRef(-1)
+  const instance = useRef('')
+  const retiredInstances = useRef(new Set<string>())
   const endpoint = workspaceId ? workspaceUrl(workspaceId, '/terminal/sessions') : ''
-  const apply = useCallback((data: { revision: number; terminals: TerminalSession[] }) => {
-    if (!Array.isArray(data.terminals) || data.revision <= revision.current) return
+  const scope = useRef({ endpoint })
+  if (scope.current.endpoint !== endpoint) scope.current = { endpoint }
+  const apply = useCallback((data: { instance?: string; revision: number; terminals: TerminalSession[] }, created?: { id: number; initial?: string }) => {
+    const nextInstance = data.instance || ''
+    if (!Array.isArray(data.terminals) || retiredInstances.current.has(nextInstance)) return false
+    if (nextInstance === instance.current && data.revision < revision.current) return false
+    if (nextInstance !== instance.current) {
+      retiredInstances.current.add(instance.current)
+      instance.current = nextInstance
+      initialCommands.current.clear()
+    } else if (data.revision === revision.current && !created?.initial) return true
+    if (created?.initial) initialCommands.current.set(created.id, created.initial)
     revision.current = data.revision
     setTerminals(data.terminals.map(t => ({ ...t, initial: initialCommands.current.get(t.id) })))
     setActiveId(current => (current === 0 && runState.current) || data.terminals.some(t => t.id === current) ? current : (data.terminals[0]?.id ?? 1))
+    return true
   }, [])
 
   useEffect(() => {
@@ -28,6 +41,9 @@ export function useTerminals(authFetch: AuthFetch | null | undefined, workspaceI
     let disposed = false
     let timer: ReturnType<typeof setTimeout>
     revision.current = -1
+    instance.current = ''
+    retiredInstances.current.clear()
+    initialCommands.current.clear()
     const poll = async () => {
       try {
         const response = await authFetch(endpoint)
@@ -73,17 +89,18 @@ export function useTerminals(authFetch: AuthFetch | null | undefined, workspaceI
 
   const mutate = useCallback(async (operation: Record<string, unknown>, initial?: string) => {
     if (!authFetch || !endpoint) return
+    const requestScope = scope.current
     try {
       const response = await authFetch(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(operation),
       })
-      if (!response.ok) return
+      if (!response.ok || scope.current !== requestScope) return
       const data = await response.json()
+      if (scope.current !== requestScope) return
+      if (!apply(data, operation.op === 'add' ? { id: data.createdId, initial } : undefined)) return
       if (operation.op === 'add') {
-        if (initial) initialCommands.current.set(data.createdId, initial)
         setActiveId(data.createdId)
       }
-      apply(data)
     } catch { /* retain the last confirmed server state */ }
   }, [authFetch, endpoint, apply])
 

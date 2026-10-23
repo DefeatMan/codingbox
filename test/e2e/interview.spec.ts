@@ -502,6 +502,46 @@ test('Run reuses one shared terminal with fresh shells and preserves manual term
   }
 });
 
+test('manual terminal lists recover after an editor process restart without reloading', async ({ browser, page }) => {
+  test.skip(process.env.RUNTIME === 'native', 'This regression restarts its own Docker container');
+  test.setTimeout(180_000);
+  await loginAdmin(page);
+  const created = await createRoom(page.request, { title: `E2E terminal restart ${Date.now()}`, minutes: 60 });
+  expect(created.status()).toBe(202);
+  const { room } = await created.json();
+  const context = await browser.newContext();
+  try {
+    await expect.poll(async () => (await (await page.request.get('/api/rooms')).json()).rooms.find((r: { id: string }) => r.id === room.id).status, { timeout: 60_000 }).toBe('active');
+    const editor = await context.newPage();
+    await editor.goto(room.joinUrl);
+    await expect(editor.getByRole('button', { name: 'Terminal 1', exact: true })).toBeVisible({ timeout: 30_000 });
+    await editor.getByTitle('New Terminal', { exact: true }).click();
+    await expect(editor.getByText('Terminal 2', { exact: true })).toBeVisible();
+    await editor.getByText('Terminal 2', { exact: true }).dblclick();
+    await editor.locator('input[value="Terminal 2"]').fill('Before restart');
+    await editor.keyboard.press('Enter');
+    await expect(editor.getByText('Before restart', { exact: true })).toBeVisible();
+    const restarted = editor.waitForResponse(async response => {
+      if (!response.url().includes('/terminal/sessions') || !response.ok()) return false;
+      const data = await response.json();
+      return Array.isArray(data.terminals) && data.revision === 0;
+    }, { timeout: 60_000 });
+    execFileSync('docker', ['restart', `codingbox-${room.id}`], { stdio: 'pipe', timeout: 30_000 });
+    // Docker may reassign the published port. Refresh the portal's target via
+    // its normal admission check while keeping this editor page mounted.
+    await expect.poll(async () => (await page.request.get(room.joinUrl)).ok(), { timeout: 30_000 }).toBe(true);
+    await restarted;
+    await expect(editor.getByText('Before restart', { exact: true })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Terminal 1', exact: true })).toBeVisible();
+    await editor.getByTitle('New Terminal', { exact: true }).click();
+    await expect(editor.getByText('Terminal 2', { exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+    await page.request.post(`/api/rooms/${room.id}/end`, { data: {} });
+    await page.request.post('/api/rooms/batch-delete', { data: { ids: [room.id] } });
+  }
+});
+
 test('room chat survives language switches and preserves multiline paste and input', async ({ browser, page }) => {
   test.setTimeout(180_000);
   await loginAdmin(page);

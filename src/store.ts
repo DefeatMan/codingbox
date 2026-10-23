@@ -5,7 +5,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 export const secret = () => randomBytes(32).toString('base64url');
-export type RoomStatus = 'starting' | 'active' | 'ending' | 'ended' | 'error';
+export type RoomStatus = 'starting' | 'recovering' | 'active' | 'ending' | 'ended' | 'error';
 export interface Room {
   id: string; code: string; title: string; language: string; status: RoomStatus;
   createdAt: number; expiresAt: number; endedAt: number | null;

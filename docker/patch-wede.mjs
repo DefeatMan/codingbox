@@ -170,7 +170,7 @@ edit('backend/internal/terminal/terminal.go', source => {
   source = replace(source, '\t"encoding/json"', '\t"encoding/json"\n\t"fmt"\n\t"strconv"');
   source = replace(source, '\tmu     sync.Mutex', '\toutputMu sync.Mutex // orders replay and live output\n\tmu     sync.Mutex');
   source = replace(source, 'sessions map[string]*session', 'sessions map[string]*session\n runOnly bool');
-  source = replace(source, '\tws       WorkspaceProvider', '\ttabs []terminalTab\n\tnextTab int\n\ttabRevision int\n\tws       WorkspaceProvider');
+  source = replace(source, '\tws       WorkspaceProvider', '\ttabs []terminalTab\n\tnextTab int\n\ttabRevision int\n\ttabInstance string\n\tws       WorkspaceProvider');
   source = replace(source, '\tif s, ok := h.sessions[id]; ok && !s.closed {', `\tif strings.HasPrefix(id, "term-") && h.nextTab > 0 {\n\t\tn, _ := strconv.Atoi(strings.TrimPrefix(id, "term-"))\n\t\tfound := false\n\t\tfor _, tab := range h.tabs { if tab.ID == n { found = true } }\n\t\tif !found { return nil, false, fmt.Errorf("terminal was closed") }\n\t}\n\n\tif s, ok := h.sessions[id]; ok && !s.closed {`);
   source = replace(source, '\tlog.Printf("[terminal] creating new session', '\tif h.runOnly { return nil, false, fmt.Errorf("Run session is no longer active") }\n return h.createSessionLocked(id, h.ws.Current(), false)\n}\n\n// Caller holds h.mu. Run sessions are only created by the serialized Run handler.\nfunc (h *Handler) createSessionLocked(id, dir string, run bool) (*session, bool, error) {\n\tlog.Printf("[terminal] creating new session');
   source = replace(source, '\tdir := h.ws.Current()\n', '');
@@ -234,7 +234,7 @@ edit('backend/internal/lsp/lsp.go', source => {
 });
 
 // Chat is room-wide; legacy language histories retain their original records.
-for (const path of ['room_history.go', 'room_history_test.go', 'room_chat.go', 'room_chat_test.go', 'room_presence.go', 'room_presence_test.go', 'chat_multiline_test.go']) {
+for (const path of ['room_history.go', 'room_history_test.go', 'room_chat.go', 'room_chat_test.go', 'room_presence.go', 'room_presence_test.go', 'room_delivery.go', 'room_delivery_test.go', 'chat_multiline_test.go']) {
   writeFileSync(join(root, 'backend/internal/chat', path), readFileSync(join(overlays, path)));
 }
 writeFileSync(join(root, 'web/src/hooks/useChat.ts'), readFileSync(join(overlays, 'useChat.ts')));
@@ -309,6 +309,25 @@ func (h *Hub) Post(user, color, text string) {
 
 `);
   return replace(source, 'h.Post(username, color, strings.TrimSpace(in.Text))', 'h.Post(username, color, in.Text)');
+});
+// Bounded delivery must disconnect on overflow so history can repair a gap.
+edit('backend/internal/chat/chat.go', source => {
+  source = replace(source, 'type peer struct {\n\tout chan []byte\n}', 'type peer struct {\n\tout chan []byte\n\tdone chan struct{}\n}');
+  source = replace(source, 'p := &peer{out: make(chan []byte, peerBuf)}', 'p := newPeer()');
+  source = replace(source, '\t\tselect {\n\t\tcase p.out <- data:\n\t\tdefault: // drop for a slow consumer rather than block the hub\n\t\t}', '\t\th.enqueueLocked(id, p, data)');
+  source = replace(source, '\t\t\tselect {\n\t\t\tcase p.out <- data:\n\t\t\tdefault:\n\t\t\t}', '\t\t\th.mu.Lock()\n\t\t\th.enqueueLocked(id, p, data)\n\t\t\th.mu.Unlock()');
+  const close = '\t\tclose(p.out)';
+  if (source.split(close).length !== 3) throw new Error('Missing peer close paths');
+  source = source.replaceAll(close, '\t\tclose(p.done)\n' + close);
+  source = replace(source, 'pingInterval    = 30 * time.Second', 'pingInterval    = 30 * time.Second\n chatWriteWait = 5 * time.Second\n chatPongWait = 75 * time.Second');
+  source = replace(source, 'go chatWritePump(conn, out, stop)', 'go chatWritePump(conn, out, stop, h.peerDone(id))');
+  source = replace(source, '\tconn.SetReadLimit(readLimit)', '\tconn.SetReadLimit(readLimit)\n conn.SetReadDeadline(time.Now().Add(chatPongWait))\n conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(chatPongWait)) })');
+  source = replace(source, 'func chatWritePump(conn *websocket.Conn, out <-chan []byte, stop <-chan struct{}) {', 'func chatWritePump(conn *websocket.Conn, out <-chan []byte, stop, disconnected <-chan struct{}) {\n defer conn.Close()');
+  source = replace(source, '\t\tcase <-stop:', '\t\tcase <-disconnected:\n\t\t\treturn\n\t\tcase <-stop:');
+  for (const call of ['conn.WriteMessage(websocket.TextMessage, data)', 'conn.WriteMessage(websocket.PingMessage, nil)']) {
+    source = replace(source, `\t\t\tif err := ${call}; err != nil {`, `\t\t\tif err := conn.SetWriteDeadline(time.Now().Add(chatWriteWait)); err != nil { return }\n\t\t\tif err := ${call}; err != nil {`);
+  }
+  return source;
 });
 // This assertion encoded the old single-line-only representation. All its
 // injection, record count, control-character and parsed-attribution checks remain.

@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ func (h *Handler) ManageSessions(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.nextTab == 0 {
+		h.tabInstance = rand.Text()
 		h.nextTab = 1
 		h.tabs = []terminalTab{{ID: 1, Name: "Terminal 1"}}
 	}
@@ -94,5 +96,5 @@ func (h *Handler) ManageSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(map[string]any{"sessions": ids, "terminals": h.tabs, "revision": h.tabRevision, "createdId": created})
+	json.NewEncoder(w).Encode(map[string]any{"instance": h.tabInstance, "sessions": ids, "terminals": h.tabs, "revision": h.tabRevision, "createdId": created})
 }

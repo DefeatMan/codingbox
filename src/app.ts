@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { Store, hash, type Room } from './store.ts';
 import { Rooms, RoomOperationError } from './rooms.ts';
-import { sendArchives } from './archives.ts';
+import { Archives } from './archives.ts';
 import type { Runtime } from './runtime.ts';
+import { createLogger, type LogRecord } from './log.ts';
 
 export interface Config {
   publicUrl: string; adminPassword: string; dataDir: string; maxRooms: number;
+  maxExports?: number; archiveReadyTimeoutMs?: number;
+  logSink?: (record: LogRecord) => void;
 }
 const cookieValue = (request: IncomingMessage, name: string) => request.headers.cookie?.split(';')
   .map(v => v.trim()).find(v => v.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -26,7 +29,10 @@ export function createApplication(config: Config, runtime: Runtime) {
   const secure = publicUrl.protocol === 'https:';
   const adminCookie = secure ? '__Host-codingbox_admin' : 'codingbox_admin';
   const store = new Store(config.dataDir);
-  const rooms = new Rooms(store, runtime);
+  const log = createLogger(() => [config.adminPassword, ...store.rooms().map(room => room.password)], config.logSink);
+  const rooms = new Rooms(store, runtime, log);
+  const archives = new Archives(runtime, log, config.maxExports, config.archiveReadyTimeoutMs);
+  let closing = false;
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback');
@@ -35,13 +41,15 @@ export function createApplication(config: Config, runtime: Runtime) {
   server.on('connection', socket => socket.on('error', () => socket.destroy()));
   const sockets = new Map<string, Set<Duplex>>();
   const routedRooms = new WeakMap<IncomingMessage, Room>();
+  const requestStarts = new WeakMap<IncomingMessage, number>();
   rooms.onEnd = id => {
     for (const socket of sockets.get(id) ?? []) socket.destroy(); sockets.delete(id);
   };
   const proxy = httpProxy.createProxyServer({ ws: true, changeOrigin: false, xfwd: false });
   proxy.on('proxyReqWs', (proxyRequest, request) => {
     proxyRequest.on('response', response => {
-      if (response.statusCode !== 101) console.error('Editor WebSocket upgrade rejected:', response.statusCode, request.url?.split('?')[0]);
+      if (response.statusCode !== 101) log({ operation: 'editor.websocket', startedAt: requestStarts.get(request) ?? Date.now(),
+        roomId: routedRooms.get(request)?.id, error: new Error(`WebSocket upgrade rejected (${response.statusCode})`) });
     });
     const room = routedRooms.get(request);
     if (!room) return;
@@ -53,7 +61,8 @@ export function createApplication(config: Config, runtime: Runtime) {
       socket.once('close', () => set.delete(socket));
     });
   });
-  proxy.on('error', (_error, _request, response) => {
+  proxy.on('error', (error, request, response) => {
+    log({ operation: 'editor.proxy', startedAt: requestStarts.get(request) ?? Date.now(), roomId: routedRooms.get(request)?.id, error });
     if ('writeHead' in response) {
       const res = response as Response;
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -78,6 +87,8 @@ export function createApplication(config: Config, runtime: Runtime) {
 
   // Room traffic is forwarded before JSON parsing; preserve streamed request bodies.
   app.use(async (req, res, next) => {
+    requestStarts.set(req, Date.now());
+    if (closing) return res.status(503).json({ error: '服务正在关闭，请稍后重试。' });
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (host(req) !== publicUrl.host) return res.status(421).send('Unknown host');
@@ -91,6 +102,7 @@ export function createApplication(config: Config, runtime: Runtime) {
     res.setHeader('Cache-Control', 'no-store');
     const room = store.byCode(path.code);
     if (!room) return roomUnavailable(res, 404);
+    routedRooms.set(req, room);
     if (!rooms.active(room)) return roomUnavailable(res, 410);
     if (!allowedOrigin(req)) return res.status(403).send('Invalid origin');
     const canonical = roomBase(room);
@@ -119,11 +131,13 @@ export function createApplication(config: Config, runtime: Runtime) {
       return res.status(403).json({ error: '请通过 Codingbox 加入面试。' });
     }
     if (req.path === '/' && req.method === 'GET') {
-      const port = await runtime.running(room);
-      if (!port) return roomUnavailable(res, 503);
+      const port = await rooms.running(room);
+      if (!port || !rooms.active(store.room(room.id))) return roomUnavailable(res, 503);
       if (port !== room.port) { store.update(room.id, { port }); room.port = port; }
     }
-    routedRooms.set(req, room);
+    // Room authentication uses its own token, never the portal's cookies.
+    delete req.headers.cookie;
+    delete req.headers['proxy-authorization'];
     req.headers['x-forwarded-proto'] = publicUrl.protocol.slice(0, -1);
     proxy.web(req, res, { target: `http://127.0.0.1:${room.port}` });
   });
@@ -182,8 +196,8 @@ export function createApplication(config: Config, runtime: Runtime) {
   });
   const selectedRooms = z.object({ ids: z.array(z.string().uuid()).min(1).max(50).transform(ids => [...new Set(ids)]) });
   app.post('/api/rooms/batch-archive', requireAdmin, limiter(10), async (req, res) => {
-    const { ids } = selectedRooms.parse(req.body);
-    await sendArchives(runtime, rooms.leaseArchives(ids), res, true);
+    const { ids, delivery } = selectedRooms.extend({ delivery: z.enum(['direct', 'download']).default('direct') }).parse(req.body);
+    await archives.send(() => rooms.leaseArchives(ids), res, true, delivery === 'download');
   });
   app.post('/api/rooms/batch-delete', requireAdmin, async (req, res) => {
     const { ids } = selectedRooms.parse(req.body);
@@ -199,22 +213,32 @@ export function createApplication(config: Config, runtime: Runtime) {
     res.json({ ok: true });
   });
   app.get('/api/rooms/:id/archive', requireAdmin, async (req, res) => {
-    await sendArchives(runtime, rooms.leaseArchives([String(req.params.id)]), res, false);
+    await archives.send(() => rooms.leaseArchives([String(req.params.id)]), res, false);
+  });
+  app.get('/api/archives/:id', requireAdmin, async (req, res) => {
+    if (req.method !== 'GET') return res.status(405).end();
+    await archives.download(String(req.params.id), res);
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: '接口不存在。' }));
   app.use(express.static(fileURLToPath(new URL('../public', import.meta.url)), { index: 'index.html' }));
-  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (res.headersSent) return res.end();
-    if (error instanceof RoomOperationError) return res.status(error.status).json({ error: error.message });
+    if (error instanceof RoomOperationError) {
+      if (error.status === 429) res.setHeader('Retry-After', '5');
+      return res.status(error.status).json({ error: error.message });
+    }
     if (error instanceof z.ZodError) return res.status(400).json({ error: '输入不正确，请检查名字、面试码或房间设置。' });
     if (error instanceof SyntaxError) return res.status(400).json({ error: '请求格式不正确。' });
+    log({ operation: `${req.method} ${req.route?.path ?? 'editor.request'}`, startedAt: requestStarts.get(req) ?? Date.now(),
+      roomId: routedRooms.get(req)?.id, error });
     res.status(502).json({ error: '操作失败，请检查运行环境和编辑器状态后重试。' });
   });
 
   const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    requestStarts.set(req, Date.now());
     const path = roomPath(req);
     const room = path ? store.byCode(path.code) : undefined;
-    if (host(req) !== publicUrl.host || !path || !rooms.active(room) || !allowedOrigin(req)) {
+    if (closing || host(req) !== publicUrl.host || !path || !rooms.active(room) || !allowedOrigin(req)) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
@@ -224,12 +248,16 @@ export function createApplication(config: Config, runtime: Runtime) {
     socket.on('close', () => { set!.delete(socket); if (!set!.size) sockets.delete(room.id); });
     req.url = path.suffix || '/';
     routedRooms.set(req, room);
+    delete req.headers.cookie;
+    delete req.headers['proxy-authorization'];
     req.headers['x-forwarded-proto'] = publicUrl.protocol.slice(0, -1);
     proxy.ws(req, socket, head, { target: `http://127.0.0.1:${room.port}` });
   };
   server.on('upgrade', upgrade);
-  return { app, server, store, rooms, async close() {
+  return { app, server, store, rooms, archives, log, async close() {
+    closing = true;
     for (const id of sockets.keys()) rooms.onEnd(id);
+    await archives.close();
     await rooms.settle();
     proxy.close();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

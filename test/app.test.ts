@@ -7,13 +7,14 @@ import { createServer, request as httpRequest } from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
-import { createApplication } from '../src/app.ts';
+import { createApplication, type Config } from '../src/app.ts';
+import type { LogRecord } from '../src/log.ts';
 import type { Runtime } from '../src/runtime.ts';
 import type { Room } from '../src/store.ts';
 
 const origin = 'http://localhost:3000';
 const base = (room: Room) => `/rooms/${room.code.toLowerCase()}/`;
-async function fixture() {
+async function fixture(options: Partial<Config> = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'codingbox-test-'));
   const editorAuth = { token: 'editor-secret', loginFailures: 0 };
   const upstream = createServer((req, res) => {
@@ -27,11 +28,11 @@ async function fixture() {
     if (req.url === '/api/auth/redeem') return res.end(JSON.stringify({ token: editorAuth.token }));
     const chunks: Buffer[] = [];
     req.on('data', chunk => chunks.push(chunk));
-    req.on('end', () => res.end(JSON.stringify({ upstream: true, path: req.url, body: Buffer.concat(chunks).toString() })));
+    req.on('end', () => res.end(JSON.stringify({ upstream: true, path: req.url, body: Buffer.concat(chunks).toString(), headers: req.headers })));
   });
   const wsServer = new WebSocketServer({ server: upstream });
   wsServer.on('connection', (socket, req) => {
-    socket.send(req.url!);
+    socket.send(req.url === '/echo-headers' ? JSON.stringify(req.headers) : req.url!);
     socket.on('message', data => socket.send(data));
   });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
@@ -45,16 +46,19 @@ async function fixture() {
     async running() { this.recoveryChecks++; return upstreamPort; },
     archive() { return spawn(process.execPath, ['-e', 'process.stdout.write("archive")']); },
   };
-  const application = createApplication({ publicUrl: origin, adminPassword: 'test-admin-password', dataDir: directory, maxRooms: 5 }, runtime);
+  const logs: LogRecord[] = [];
+  const application = createApplication({ publicUrl: origin, adminPassword: 'test-admin-password', dataDir: directory, maxRooms: 5,
+    logSink: record => logs.push(record), ...options }, runtime);
   application.server.listen(0, '127.0.0.1'); await once(application.server, 'listening');
   const port = (application.server.address() as { port: number }).port;
-  const request = (path: string, body?: unknown, options: { method?: string; cookie?: string; origin?: string; authorization?: string; host?: string } = {}) => new Promise<Response>((resolve, reject) => {
+  const request = (path: string, body?: unknown, options: { method?: string; cookie?: string; origin?: string; authorization?: string; proxyAuthorization?: string; host?: string } = {}) => new Promise<Response>((resolve, reject) => {
     const req = httpRequest(`http://127.0.0.1:${port}${path}`, {
       method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { Host: options.host ?? 'localhost:3000',
         ...(options.cookie ? { Cookie: options.cookie } : {}),
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...(options.origin ? { Origin: options.origin } : {}),
         ...(options.authorization ? { Authorization: options.authorization } : {}),
+        ...(options.proxyAuthorization ? { 'Proxy-Authorization': options.proxyAuthorization } : {}),
       },
     }, res => {
       const chunks: Buffer[] = [];
@@ -78,7 +82,7 @@ async function fixture() {
     await application.rooms.settle();
     return application.store.room(room.id)!;
   };
-  return { ...application, runtime, editorAuth, request, create, admin, port, async dispose() {
+  return { ...application, runtime, editorAuth, logs, request, create, admin, port, async dispose() {
     await application.close();
     for (const client of wsServer.clients) client.terminate();
     wsServer.close();
@@ -141,6 +145,28 @@ test('HTTP proxy strips only the room prefix and preserves query and streamed bo
     const result = await response.json();
     assert.equal(result.path, '/api/workspaces/default/files/write?path=nested%2Fmain.py');
     assert.deepEqual(JSON.parse(result.body), { content: 'print("hello")' });
+  } finally { await f.dispose(); }
+});
+
+test('HTTP and WebSocket proxies strip portal credentials and preserve editor authentication', async () => {
+  const f = await fixture();
+  try {
+    const room = await f.create();
+    const cookie = `${f.admin.cookie}; __Host-codingbox_admin=secure-secret; unrelated=private`;
+    const response = await f.request(`${base(room)}echo-headers`, undefined, { cookie, authorization: 'editor-secret', proxyAuthorization: 'Basic proxy-secret' });
+    const { headers } = await response.json();
+    assert.equal(headers.cookie, undefined); assert.equal(headers['proxy-authorization'], undefined);
+    assert.equal(headers.authorization, 'editor-secret');
+    const client = new WebSocket(`ws://127.0.0.1:${f.port}${base(room)}echo-headers`, ['auth.editor-secret'], {
+      headers: { Host: 'localhost:3000', Cookie: cookie, 'Proxy-Authorization': 'Basic proxy-secret' },
+    });
+    const [message] = await once(client, 'message');
+    const forwarded = JSON.parse(String(message));
+    assert.equal(forwarded.cookie, undefined); assert.equal(forwarded['proxy-authorization'], undefined);
+    assert.equal(forwarded['sec-websocket-protocol'], 'auth.editor-secret');
+    assert.equal(client.protocol, 'auth.editor-secret');
+    const closed = once(client, 'close'); client.close(); await closed;
+    assert.equal((await f.request('/api/rooms', undefined, f.admin)).status, 200);
   } finally { await f.dispose(); }
 });
 
@@ -237,6 +263,92 @@ test('startup reconciliation refreshes ports and cleans interrupted provisioning
   } finally { await f.dispose(); }
 });
 
+test('reconciliation isolates inspect and stop failures, and sweep retries recovering rooms', async () => {
+  const f = await fixture();
+  try {
+    const broken = await f.create(); const healthy = await f.create();
+    const interrupted = f.store.createRoom('Interrupted', 'python', 60);
+    const inspect = f.runtime.running.bind(f.runtime); const stop = f.runtime.stop.bind(f.runtime);
+    f.runtime.running = async room => { if (room.id === broken.id) throw new Error(`inspect WEDE_PASSWORD=${room.password}`); return inspect(room); };
+    f.runtime.stop = async room => { if (room.id === interrupted.id) throw new Error('stop unavailable'); return stop(room); };
+    f.store.update(healthy.id, { port: 1 });
+    await f.rooms.reconcile();
+    assert.equal(f.store.room(broken.id)?.status, 'recovering');
+    assert.equal(f.store.room(broken.id)?.port, null);
+    assert.equal((await f.request(base(broken))).status, 410);
+    assert.equal(f.store.room(interrupted.id)?.status, 'error');
+    assert.equal(f.store.room(healthy.id)?.port, healthy.port);
+    assert.equal(f.store.room(healthy.id)?.status, 'active');
+    assert.ok(f.logs.some(log => log.operation === 'room.recover' && log.roomId === broken.id));
+    assert.ok(f.logs.some(log => log.operation === 'room.end' && log.roomId === interrupted.id));
+    assert.ok(!JSON.stringify(f.logs).includes(broken.password));
+    f.runtime.running = async room => { assert.equal(room.status, 'recovering'); return inspect(room); };
+    await f.rooms.sweep();
+    assert.equal(f.store.room(broken.id)?.status, 'active');
+    assert.equal(f.store.room(broken.id)?.error, null);
+    f.runtime.stop = stop;
+    await f.rooms.end(f.store.room(interrupted.id)!);
+    assert.equal(f.store.room(interrupted.id)?.status, 'ended');
+  } finally { await f.dispose(); }
+});
+
+test('settling waits for every recovery in an in-flight sweep before storage can close', { timeout: 10_000 }, async () => {
+  const f = await fixture();
+  const releases: (() => void)[] = [];
+  let unblock = false;
+  try {
+    const first = await f.create(); const second = await f.create();
+    for (const room of [first, second]) f.store.update(room.id, { status: 'recovering', port: null });
+    let enteredFirst!: () => void; let enteredSecond!: () => void;
+    const firstStarted = new Promise<void>(resolve => { enteredFirst = resolve; });
+    const secondStarted = new Promise<void>(resolve => { enteredSecond = resolve; });
+    f.runtime.running = async () => {
+      if (unblock) return first.port;
+      const gate = new Promise<void>(resolve => releases.push(resolve));
+      (releases.length === 1 ? enteredFirst : enteredSecond)();
+      await gate; return first.port;
+    };
+    const sweep = f.rooms.sweep(); await firstStarted;
+    assert.equal(f.rooms.sweep(), sweep);
+    let settled = false;
+    const settling = f.rooms.settle().then(() => { settled = true; });
+    releases[0](); await secondStarted;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    releases[1](); await settling; await sweep;
+    assert.equal(f.store.room(first.id)?.status, 'active');
+    assert.equal(f.store.room(second.id)?.status, 'active');
+  } finally { unblock = true; for (const release of releases) release(); await f.dispose(); }
+});
+
+for (const entry of ['homepage', 'bootstrap', 'sweep'] as const) {
+  test(`end waits for ${entry} recovery and rejects new launch attempts`, { timeout: 10_000 }, async () => {
+    const f = await fixture();
+    let release: (() => void) | undefined;
+    try {
+      const room = await f.create();
+      let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve; });
+      let launches = 0;
+      f.runtime.running = () => new Promise<number>(resolve => { launches++; release = () => resolve(room.port!); started(); });
+      if (entry === 'bootstrap') f.editorAuth.loginFailures = 1;
+      if (entry === 'sweep') f.store.update(room.id, { status: 'recovering', port: null });
+      const opening = entry === 'sweep' ? f.rooms.sweep()
+        : f.request(base(room) + (entry === 'bootstrap' ? '__codingbox/bootstrap' : ''));
+      await ready;
+      const ending = f.rooms.end(room);
+      assert.equal(f.rooms.active(f.store.room(room.id)), false);
+      assert.equal(await f.rooms.running(room), null);
+      assert.equal(launches, 1); assert.equal(f.runtime.stopped.length, 0);
+      release!(); await ending;
+      const result = await opening;
+      if (result) assert.notEqual(result.status, 200);
+      assert.equal(f.store.room(room.id)?.status, 'ended');
+      assert.deepEqual(f.runtime.stopped, [room.id]);
+      await f.rooms.sweep(); assert.equal(launches, 1);
+    } finally { release?.(); await f.dispose(); }
+  });
+}
+
 test('room creation defaults to Python without a language choice', async () => {
   const f = await fixture();
   try {
@@ -314,6 +426,109 @@ test('batch export contains selected archives and a manifest; running rooms are 
     assert.equal((await f.request('/api/rooms/batch-archive', { ids: [first.id] }, f.admin)).status, 502);
     assert.equal((await f.request(`/api/rooms/${first.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200, 'failed export must release its lease');
   } finally { await f.dispose(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('direct and prepared exports share a limit without leasing rejected rooms', { timeout: 10_000 }, async () => {
+  const f = await fixture({ maxExports: 1 });
+  let release: (() => void) | undefined;
+  try {
+    const first = await f.create(); const second = await f.create();
+    await f.rooms.end(first); await f.rooms.end(second);
+    const archive = f.runtime.archive;
+    let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve; });
+    f.runtime.archive = () => {
+      const child = spawn(process.execPath, ['-e', 'process.stdin.once("data", () => process.stdout.write("archive"))'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      release = () => child.stdin!.end('go'); started(); return child;
+    };
+    const download = f.request(`/api/rooms/${first.id}/archive`, undefined, f.admin);
+    await ready;
+    assert.equal((await f.request(`/api/rooms/${second.id}/archive`, undefined, f.admin)).status, 429);
+    const rejected = await f.request('/api/rooms/batch-archive', { ids: [second.id], delivery: 'download' }, f.admin);
+    assert.equal(rejected.status, 429); assert.equal(rejected.headers.get('retry-after'), '5');
+    assert.equal((await f.request(`/api/rooms/${second.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+    release!(); assert.equal(await (await download).text(), 'archive');
+    f.runtime.archive = archive;
+    let next: Response | undefined;
+    for (let i = 0; i < 100; i++) {
+      next = await f.request(`/api/rooms/${first.id}/archive`, undefined, f.admin);
+      if (next.status !== 429) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(next?.status, 200, 'completed export must release its capacity');
+  } finally { release?.(); await f.dispose(); }
+});
+
+test('prepared download requires admin, is consumed once and retains its deletion lease', async () => {
+  const f = await fixture();
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    const prepare = await f.request('/api/rooms/batch-archive', { ids: [room.id], delivery: 'download' }, f.admin);
+    assert.equal(prepare.status, 200);
+    const { url } = await prepare.json();
+    assert.match(url, /^\/api\/archives\/[a-f0-9-]+$/);
+    assert.equal((await f.request(url)).status, 401);
+    assert.equal((await f.request(url, undefined, { ...f.admin, method: 'HEAD' })).status, 405);
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 409);
+    const download = await f.request(url, undefined, f.admin);
+    assert.equal(download.status, 200);
+    assert.match(download.headers.get('content-disposition')!, /attachment; filename="codingbox-interviews.tar.gz"/);
+    const data = Buffer.from(await download.arrayBuffer());
+    assert.equal(Number(download.headers.get('content-length')), data.length);
+    assert.equal(data.readUInt16BE(0), 0x1f8b);
+    assert.equal((await f.request(url, undefined, f.admin)).status, 410);
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+  } finally { await f.dispose(); }
+});
+
+test('unused prepared downloads expire and shutdown releases ready reservations', async () => {
+  const f = await fixture({ maxExports: 1, archiveReadyTimeoutMs: 100 });
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    const prepared = await f.request('/api/rooms/batch-archive', { ids: [room.id], delivery: 'download' }, f.admin);
+    const { url } = await prepared.json();
+    assert.equal((await f.request(`/api/rooms/${room.id}/archive`, undefined, f.admin)).status, 429);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal((await f.request(url, undefined, f.admin)).status, 410);
+    const next = await f.request('/api/rooms/batch-archive', { ids: [room.id], delivery: 'download' }, f.admin);
+    assert.equal(next.status, 200);
+    const nextUrl = (await next.json()).url;
+    await f.archives.close();
+    assert.equal((await f.request(nextUrl, undefined, f.admin)).status, 410);
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+  } finally { await f.dispose(); }
+});
+
+test('archive worker cleanup finishes before releasing its room or sending success', { timeout: 10_000 }, async () => {
+  const f = await fixture({ maxExports: 1 });
+  let release: (() => void) | undefined;
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    let started!: () => void; const cleaning = new Promise<void>(resolve => { started = resolve; });
+    f.runtime.archive = () => Object.assign(spawn(process.execPath, ['-e', 'process.stdout.write("archive")']), {
+      cleanup: () => new Promise<void>(resolve => { release = resolve; started(); }),
+    });
+    const download = f.request(`/api/rooms/${room.id}/archive`, undefined, f.admin);
+    await cleaning;
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 409);
+    assert.equal((await f.request(`/api/rooms/${room.id}/archive`, undefined, f.admin)).status, 429);
+    release!(); assert.equal((await download).status, 200);
+    assert.equal((await f.request(`/api/rooms/${room.id}`, undefined, { ...f.admin, method: 'DELETE' })).status, 200);
+  } finally { release?.(); await f.dispose(); }
+});
+
+test('archive worker cleanup failures retain diagnostic context without sending a successful file', async () => {
+  const f = await fixture();
+  try {
+    const room = await f.create(); await f.rooms.end(room);
+    f.runtime.archive = () => Object.assign(spawn(process.execPath, ['-e', 'process.stdout.write("archive")']), {
+      async cleanup() { throw new Error(`worker cleanup failed WEDE_PASSWORD=${room.password}`); },
+    });
+    const response = await f.request(`/api/rooms/${room.id}/archive`, undefined, f.admin);
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get('content-disposition'), null);
+    assert.ok(f.logs.some(record => record.operation === 'archive.worker.cleanup' && record.roomId === room.id));
+    assert.ok(!JSON.stringify(f.logs).includes(room.password));
+  } finally { await f.dispose(); }
 });
 
 test('download and deletion reservations cannot overlap', { timeout: 10_000 }, async () => {

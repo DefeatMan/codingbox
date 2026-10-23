@@ -1,0 +1,33 @@
+## TL;DR
+
+Prevent credential forwarding, isolate recovery failures, repair terminal/chat reconnection, bound exports, and improve diagnostics and CI.
+
+## Details
+
+Scope: seven approved improvements; retain SQLite, one portal process, Docker/native runtimes, existing archive APIs and WEDE overlays. No deployment or origin redesign. Cookie removal does not isolate arbitrary same-origin content.
+
+### Research and decisions
+
+Baseline: Codingbox `202f6c27b8119f2e1c1a3eda2f8a52fb502f9e34`, WEDE `1a9b39f7ec526507b96182db62ef3c430eb9ea9f`. Paths below refer to these commits; upstream paths are relative to `third_party/wede`.
+
+1. **Proxy credentials.** `src/app.ts:126-128,225-228` forwards headers; admin cookies use `/` at line 148. Isolated HTTP/WS probes received the cookie. [MDN Cookie, syntax](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cookie#syntax) explains browser-supplied cookie lists. Strip Cookie and Proxy-Authorization in both transports, retaining WEDE Authorization/subprotocols. Cookie paths cannot solve same-origin execution; separate origins exceed this fix.
+
+2. **Recovery ownership.** `src/main.ts:21` awaits reconciliation; `src/rooms.ts:114,124` lets one runtime failure stop all recovery. `src/native-runtime.ts:70-76` rejects recovering status; lines 87-96 can launch editors through `src/app.ts:122` and `src/rooms.ts:97`, outside lifecycle maps. Add persisted `recovering`, deny access and retry every 15 seconds. Treat Runtime.running as potentially mutating: Rooms owns/deduplicates every external call, including homepage, bootstrap fallback and reconciliation. NativeRuntime accepts recovering records. End blocks new checks/admission, waits for existing checks plus provisioning/recovery, then stops; late results cannot restore access. Runtime.start's internal Docker inspection already belongs to provisioning. Preserve interrupted-start cleanup and isolate each room's failure. Ignoring errors admits stale targets; deleting rooms discards recoverable sessions.
+
+3. **Terminal generations.** `docker/wede/useTerminals.ts:19-20` rejects lower revisions: a revision-5 probe ignored restarted revisions 0/1. Reuse Run's instance/revision mechanism at lines 45-52 for manual terminals; clear old initial commands, reject departed-workspace replies and retain same-instance ordering. Accepting all lower revisions allows stale replies.
+
+4. **Chat delivery.** Upstream `backend/internal/chat/chat.go:290-296` and `docker/wede/room_presence.go:118-122` drop full queues: a stalled probe received 64/100 events while remaining connected. `docker/wede/room_chat.go:12-37` sends history first; `docker/wede/useChat.ts:45-49,67-73` replaces history on reconnect. [Gorilla v1.5.3, Concurrency and deadlines](https://pkg.go.dev/github.com/gorilla/websocket@v1.5.3#hdr-Concurrency) requires one reader/writer and treats timed-out connections as unusable. Under the hub lock, deregister overflowing peers and signal their writer to close the socket, unblock reads and clean up presence. Bound writes, add pong/read deadlines, and apply one enqueue policy to user/presence/activity frames. Reconnect restores history. Unbounded queues risk memory; blocking stalls healthy peers; cursor/ack storage is unnecessary for current room histories.
+
+5. **Bounded native downloads.** `src/archives.ts:42-82` already stages files, checks child exits and bounds bytes/time; `public/app.js:171` buffers a complete Blob. [MDN Content-Disposition, response header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Disposition#as_a_response_header_for_the_main_body) supports attachments; [Node 24 promise pipeline](https://github.com/nodejs/node/blob/v24.x/doc/api/stream.md#streampipelinesource-transforms-destination-options) supports abort-driven stream destruction. Reuse staging/cancellation behind one manager: at most two preparing, ready or downloading exports; reject excess. Preparation POST returns a one-use URL after success; GET still requires admin auth. Ready URLs expire after 60 seconds. Hold deletion leases through transfer/expiry; idempotently remove files and release slots/leases on failure, cancellation and shutdown. Direct APIs share the limit. URLs are process-local. Native form submission complicates preparation errors; durable queues exceed current needs. Verify Docker worker cleanup, since stream cancellation alone does not prove subprocess cleanup.
+
+6. **CI.** `.github/workflows/ci.yml:16-18,32-42` never runs Go tests; `docker/wede.Dockerfile:24` only builds. [Go race detector, Usage and How To Use](https://go.dev/doc/articles/race_detector) requires `-race` and only detects executed races. Copy upstream to a temporary directory, apply production overlays, run chat/interview/terminal/collabdoc with `-race`, then clean up. Add Ubuntu CI using the repository Go version. Linux execution is necessary for Linux process cleanup; leave the submodule untouched.
+
+7. **Diagnostics.** `src/rooms.ts:28-33,85-87`, `src/archives.ts:73-76` and `src/app.ts:206-211` discard causes; Docker errors can contain password-bearing commands (`src/runtime.ts:17-23`). [OWASP Logging, Event attributes, Data to exclude, Event collection](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#data-to-exclude) supports useful context, credential exclusion and non-disruptive logging. Emit JSON operation, room IDs, duration and bounded allowlisted error fields. Redact known passwords and credential-shaped values. Exclude request headers/bodies and whole Error objects; distinguish cancellation. Keep client errors sanitized. Console JSON avoids another service.
+
+Node's versioned docs URL was inaccessible through the browser tool; the official nodejs/node source was opened instead. No production throughput or large-history performance claim is made.
+
+### Validation
+
+Observed before implementation: typecheck, 22 portal tests and four patched Go race-tested packages passed on macOS. Four isolated probes reproduced items 1-4; these are not production incident claims.
+
+Planned regressions: HTTP/WS stripping with editor auth preserved; inspect/stop failure beside healthy rooms; native sweep and homepage/bootstrap recovery versus end; terminal restart/stale replies; chat overflow, replay, healthy peers, concurrent leave/close and writer termination; export capacity, auth, expiry, cancellation, deletion leases and shutdown; log redaction and failing sinks. Run typecheck, portal tests, patched Go race tests on Linux, image build and isolated browser E2E including native batch download. Record actual failures and platform limits; race tests cannot prove race absence.

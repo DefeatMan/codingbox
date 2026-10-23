@@ -34,6 +34,7 @@ ADMIN_PASSWORD=填写至少12位的独立随机密码
 DATA_DIR=/opt/codingbox/.data
 WEDE_IMAGE=codingbox-wede:local
 MAX_ACTIVE_ROOMS=5
+MAX_CONCURRENT_EXPORTS=2
 ROOM_MEMORY=1g
 ROOM_CPUS=1
 ```
@@ -79,6 +80,8 @@ https://app.boxlite.ai {
 
 日志：`journalctl -u codingbox -f`。健康检查：`curl http://127.0.0.1:3000/healthz`。
 
+失败日志使用 JSON，包含 `operation`、房间 ID、`durationMs` 与经过脱敏的错误原因；不记录请求头或请求体。客户端主动取消导出记为 `info`，操作失败记为 `error`。
+
 ## 数据与清理
 
 | 数据 | 位置 / 策略 |
@@ -87,6 +90,9 @@ https://app.boxlite.ai {
 | 面试源码、WEDE 状态 | 命名卷 `codingbox-<房间 UUID>` |
 | 结束后的容器 | 自动移除 |
 | 结束后的数据卷 | 保留，不自动删除 |
+| 导出临时文件 | 系统临时目录；完成、取消或正常关闭时清理，待下载链接保留 60 秒 |
+
+`MAX_CONCURRENT_EXPORTS` 默认 2，覆盖单条与批量导出的准备、等待下载及传输阶段。达到上限时返回 429 和 `Retry-After`；准备中的记录也暂不能删除。强制终止门户可能留下临时目录，清理前应确认没有运行中的导出任务。
 
 优先通过门户下载已结束房间的代码。数据库备份使用 SQLite online backup，或先停门户再复制整个 `.data`；同时备份需要保留的 Docker 卷。
 
@@ -109,4 +115,6 @@ docker volume rm codingbox-替换为房间UUID
 | WebSocket 失败 | Upgrade 头、HTTPS 协议头、代理超时 |
 | Docker Hub 401 | 修复本机 registry 登录；不要将个人 registry 凭证提交到仓库 |
 | 无法结束 | Docker daemon 是否可用；恢复后再次点击结束 |
+| 房间显示恢复中 | 查看 `room.recover` 日志；自动每 15 秒重试，单房间失败不阻止其他房间恢复 |
+| 导出提示稍后重试 | 检查并发任务；未领取的下载链接 60 秒后释放名额，失败原因见 `archive.export` 日志 |
 | 文件与终端内容不同 | 上游外部磁盘同步限制；避免从终端改已打开文件 |

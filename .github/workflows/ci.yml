@@ -16,6 +16,20 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+  wede:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/wede/go.mod
+          cache-dependency-path: third_party/wede/go.sum
+      - run: npm run test:wede
   browser:
     runs-on: ubuntu-latest
     env:

@@ -27,6 +27,11 @@ test('interview history supports search, pages, selection, export and permanent 
   test.setTimeout(300_000);
   const prefix = `History-${Date.now()}`;
   const ids: string[] = [];
+  // Batch exports must use the browser download path without buffering a Blob.
+  await page.addInitScript(() => {
+    Response.prototype.blob = async () => { throw new Error('Export must not buffer a Blob'); };
+    URL.createObjectURL = () => { throw new Error('Export must not create an object URL'); };
+  });
   await page.goto('/');
   await page.getByRole('button', { name: '面试官入口' }).click();
   await page.getByLabel('面试官密码', { exact: true }).fill(process.env.ADMIN_PASSWORD!);

@@ -56,3 +56,26 @@ func TestSharedTerminalRegistry(t *testing.T) {
 		t.Fatal("closed tab can recreate its PTY")
 	}
 }
+
+func TestTerminalRegistryInstanceSurvivesMutationsAndChangesOnRestart(t *testing.T) {
+	read := func(h *Handler, method, body string) map[string]any {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.ManageSessions(w, httptest.NewRequest(method, "/", strings.NewReader(body)))
+		var result map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := &Handler{sessions: make(map[string]*session)}
+	initial := read(first, "GET", "")
+	updated := read(first, "POST", `{"op":"rename","id":1,"name":"Shared"}`)
+	restarted := read(&Handler{sessions: make(map[string]*session)}, "GET", "")
+	if initial["instance"] == "" || initial["instance"] != updated["instance"] || initial["instance"] == restarted["instance"] {
+		t.Fatal("invalid registry instance lifecycle")
+	}
+	if updated["revision"] != float64(1) || restarted["revision"] != float64(0) {
+		t.Fatal("restart revisions were not independent")
+	}
+}

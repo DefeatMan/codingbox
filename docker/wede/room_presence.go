@@ -115,11 +115,8 @@ func (h *Hub) roomPresenceLocked(text string) *Message {
 	event := &Message{ID: h.nextID(), Kind: "system", Text: text, Time: time.Now().UTC()}
 	h.history = append(h.history, *event)
 	data, _ := json.Marshal(outEnvelope{Type: "msg", Message: event})
-	for _, peer := range h.peers {
-		select {
-		case peer.out <- data:
-		default:
-		}
+	for id, peer := range h.peers {
+		h.enqueueLocked(id, peer, data)
 	}
 	return event
 }

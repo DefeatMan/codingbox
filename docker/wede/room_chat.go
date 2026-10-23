@@ -20,7 +20,7 @@ func (h *Hub) JoinRoom(username, color string) (string, <-chan []byte) {
 	}
 	h.counter++
 	id := fmt.Sprintf("m%d", h.counter)
-	p := &peer{out: make(chan []byte, peerBuf)}
+	p := newPeer()
 	history := append([]Message{}, h.history...)
 	sort.SliceStable(history, func(i, j int) bool { return history[i].Time.Before(history[j].Time) })
 	data, _ := json.Marshal(struct {
@@ -56,10 +56,7 @@ func (h *Hub) sendRoomActivity(id string, p *peer) {
 	if h.closed || h.peers[id] != p {
 		return
 	}
-	select {
-	case p.out <- data:
-	default:
-	}
+	h.enqueueLocked(id, p, data)
 }
 
 func (h *Hub) HandleRoomWS(w http.ResponseWriter, r *http.Request) { h.handleWS(w, r, true) }
