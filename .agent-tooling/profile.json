@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "profile": "codingbox",
+  "repository": "DefeatMan/codingbox",
+  "tooling": {
+    "repository": "boxlite-ai/agent-tooling",
+    "ref": "main"
+  },
+  "checks": [
+    {
+      "name": "typecheck",
+      "command": "npm run check"
+    },
+    {
+      "name": "unit-tests",
+      "command": "npm test"
+    },
+    {
+      "name": "wede-race-tests",
+      "command": "npm run test:wede"
+    }
+  ]
+}

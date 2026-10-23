@@ -110,6 +110,18 @@ npm run test:e2e
 
 终端默认在底部展开。终端列表由服务端管理，约每半秒检查更新；跨公网时还需加上网络延迟。编辑器进程重启后，手动终端接受新列表并清除旧的初始化命令。协作状态保存在项目的 `.wede/collab`，用于重连和进程恢复，避免纯文本重新初始化导致内容叠加。
 
+## 代理开发工具
+
+本仓库使用 [BoxLite Agent Tooling](https://github.com/boxlite-ai/agent-tooling) 提供 Git 审计和共享开发规范。代理开发前，在仓库根目录运行：
+
+```sh
+./.agent-tooling/install.sh
+```
+
+安装需要 Bash、Git、jq、Perl 和网络连接；会为当前工作区配置 Git hooks，并更新 `AGENTS.md` 与 `CLAUDE.md`。检查命令声明在 `.agent-tooling/profile.json`，审计运行数据仅保存在被忽略的本地目录。Codex 或 Claude 的插件启用步骤见[官方接入说明](https://github.com/boxlite-ai/agent-tooling#add-to-a-repository)。
+
+`.agent-tooling/` 下的安装和启动脚本来自该项目，采用 Apache-2.0，许可文本见 [.agent-tooling/LICENSE](.agent-tooling/LICENSE)。
+
 ## 已知边界
 
 - 这是单机实验版，容器提供基本隔离，不等同于微虚拟机。编辑器不挂载 Docker socket、主机目录或业务凭证。
